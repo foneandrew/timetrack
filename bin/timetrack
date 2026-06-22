@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""timetrack — reconstruct a rough, visual picture of where YOUR attention went
+each day across parallel git worktrees, for filling in timesheets.
+
+Dumb builder, smart template: this script greps the durable signal sources,
+normalises everything to LOCAL time, and emits a JSON blob that gets injected
+into template.html. All timeline maths (latest-wins attention, meeting overlay,
+toggles) lives in the template's JS.
+
+v1 signals: human-typed Claude prompts + gco/gcod checkouts.
+Everything is re-derived each run — no store to maintain.
+"""
+
+import argparse
+import datetime as dt
+import glob
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+CLAUDE_PROJECTS = HOME / ".claude" / "projects"
+GCOD_LOG = HOME / ".timetrack" / "checkouts.log"  # written by the gco/gcod wrapper
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+TEMPLATE = Path(__file__).resolve().parent.parent / "template.html"
+OUT = Path(__file__).resolve().parent.parent / "out" / "timetrack.html"
+
+JIRA_RE = re.compile(r"([A-Za-z]+-\d+)")
+
+DEFAULTS = {
+    # repo paths whose lane is pinned at the top as the "app" lane
+    "app_paths": [str(HOME / "dev" / "cmr-web")],
+    "ics_url": None,        # Outlook published calendar .ics (secret — keep out of git)
+    "skip_meetings": [],    # meeting title substrings that default to OFF
+}
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    if CONFIG_PATH.exists():
+        try:
+            cfg.update(json.loads(CONFIG_PATH.read_text()))
+        except Exception as e:
+            print(f"warning: could not read {CONFIG_PATH}: {e}", file=sys.stderr)
+    return cfg
+
+
+def to_local(ts_str):
+    """Parse an ISO timestamp (with Z or offset) and return a LOCAL aware datetime.
+    This is the single most important function: every source must pass through it
+    so morning UTC timestamps land on the correct local day."""
+    if not ts_str:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.astimezone()  # assume local if naive
+    return d.astimezone()
+
+
+def jira_from(branch):
+    if not branch:
+        return None
+    m = JIRA_RE.search(branch)
+    return m.group(1).upper() if m else None
+
+
+def window_bounds(weeks):
+    now = dt.datetime.now().astimezone()
+    today = now.date()
+    monday = today - dt.timedelta(days=today.weekday())
+    start_date = monday - dt.timedelta(days=(weeks - 1) * 7)
+    start_dt = dt.datetime.combine(start_date, dt.time.min).astimezone()
+    return start_dt, now, start_date, today
+
+
+def lane_meta(cwd, app_paths):
+    """Build a stable lane descriptor for a working directory."""
+    p = cwd.rstrip("/")
+    is_app = any(p == a.rstrip("/") for a in app_paths)
+    parts = p.split("/")
+    # nice label: for ~/dev/cmr-web-ralph/pbl-7198 -> "cmr-web-ralph/pbl-7198"
+    label = "/".join(parts[-2:]) if len(parts) >= 2 else p
+    repo = parts[-1]
+    return {"id": p, "path": p, "label": label, "repo": repo, "isApp": is_app}
+
+
+def collect_prompts(start_dt, end_dt, app_paths):
+    """Human-typed Claude prompts: type==user, promptSource==typed."""
+    events = []
+    lanes = {}
+    if not CLAUDE_PROJECTS.exists():
+        return events, lanes
+    start_epoch = start_dt.timestamp()
+    for fp in glob.glob(str(CLAUDE_PROJECTS / "*" / "*.jsonl")):
+        # cheap skip: file untouched before the window can't hold in-window events
+        try:
+            if os.path.getmtime(fp) < start_epoch:
+                continue
+        except OSError:
+            continue
+        with open(fp, "r", errors="replace") as fh:
+            for line in fh:
+                if '"typed"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") != "user" or d.get("promptSource") != "typed":
+                    continue
+                local = to_local(d.get("timestamp"))
+                if not local or not (start_dt <= local <= end_dt):
+                    continue
+                cwd = d.get("cwd")
+                if not cwd:
+                    continue
+                lm = lane_meta(cwd, app_paths)
+                lanes[lm["id"]] = lm
+                events.append({
+                    "date": local.date().isoformat(),
+                    "minute": local.hour * 60 + local.minute,
+                    "ts": local.isoformat(),
+                    "lane": lm["id"],
+                    "jira": jira_from(d.get("gitBranch")),
+                    "branch": d.get("gitBranch"),
+                    "type": "prompt",
+                })
+    return events, lanes
+
+
+def collect_checkouts(start_dt, end_dt, app_paths):
+    """gco/gcod wrapper log lines: <epoch>\t<cwd>\t<branch>\t<action>."""
+    events = []
+    lanes = {}
+    if not GCOD_LOG.exists():
+        return events, lanes
+    for line in GCOD_LOG.read_text(errors="replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        epoch, cwd, branch, action = parts[0], parts[1], parts[2], parts[3]
+        try:
+            local = dt.datetime.fromtimestamp(int(epoch)).astimezone()
+        except (ValueError, OverflowError):
+            continue
+        if not (start_dt <= local <= end_dt) or not cwd:
+            continue
+        lm = lane_meta(cwd, app_paths)
+        lanes[lm["id"]] = lm
+        events.append({
+            "date": local.date().isoformat(),
+            "minute": local.hour * 60 + local.minute,
+            "ts": local.isoformat(),
+            "lane": lm["id"],
+            "jira": jira_from(branch),
+            "branch": branch or None,
+            "type": action if action in ("gco", "gcod") else "checkout",
+        })
+    return events, lanes
+
+
+def build_weeks(start_date, today):
+    """Mon–Fri columns per ISO week across the window."""
+    weeks = []
+    monday = start_date - dt.timedelta(days=start_date.weekday())
+    cur_monday = today - dt.timedelta(days=today.weekday())
+    while monday <= cur_monday:
+        days = []
+        for i in range(5):  # Mon..Fri
+            d = monday + dt.timedelta(days=i)
+            days.append({
+                "date": d.isoformat(),
+                "weekday": d.strftime("%A"),
+                "short": d.strftime("%a %-d %b"),
+                "isToday": d == today,
+            })
+        iso_year, iso_week, _ = monday.isocalendar()
+        weeks.append({
+            "iso": f"{iso_year}-W{iso_week:02d}",
+            "label": f"{monday.strftime('%-d %b')} – {(monday + dt.timedelta(days=4)).strftime('%-d %b')}",
+            "monday": monday.isoformat(),
+            "isCurrent": monday == cur_monday,
+            "days": days,
+        })
+        monday += dt.timedelta(days=7)
+    return weeks
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Build the timetrack visual.")
+    ap.add_argument("-w", "--weeks", type=int, default=4,
+                    help="number of weeks to scan, ending this week (default 4)")
+    ap.add_argument("--json", action="store_true", help="print JSON to stdout, don't write HTML")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    app_paths = cfg["app_paths"]
+    start_dt, end_dt, start_date, today = window_bounds(args.weeks)
+
+    p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
+    c_events, c_lanes = collect_checkouts(start_dt, end_dt, app_paths)
+
+    lanes = {**p_lanes, **c_lanes}
+    events = sorted(p_events + c_events, key=lambda e: e["ts"])
+
+    blob = {
+        "generatedAt": end_dt.isoformat(),
+        "tz": str(end_dt.tzinfo),
+        "window": {
+            "start": start_dt.date().isoformat(),
+            "end": today.isoformat(),
+            "weeks": args.weeks,
+        },
+        "frame": {"startMin": 8 * 60, "endMin": 17 * 60, "idleTailMin": 30},
+        "lanes": lanes,
+        "events": events,
+        "meetings": [],  # wired in a later increment (ICS + RRULE)
+        "weeks": build_weeks(start_date, today),
+        "config": {"appPaths": app_paths, "skipMeetings": cfg["skip_meetings"]},
+    }
+
+    if args.json:
+        print(json.dumps(blob, indent=2))
+        return
+
+    if not TEMPLATE.exists():
+        print(json.dumps(blob, indent=2))
+        print(f"\n(no template at {TEMPLATE} yet — printed JSON instead)", file=sys.stderr)
+        return
+
+    html = TEMPLATE.read_text()
+    payload = "window.__TIMETRACK__ = " + json.dumps(blob) + ";"
+    html = html.replace("/*__TIMETRACK_DATA__*/", payload)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(html)
+    print(f"wrote {OUT}  ({len(events)} events, {len(lanes)} lanes, {len(blob['weeks'])} weeks)")
+    os.system(f"open {OUT}")
+
+
+if __name__ == "__main__":
+    main()

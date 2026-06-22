@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>timetrack</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .seg { transition: filter .12s ease, outline .12s ease; }
+  .seg:hover { filter: brightness(1.18); outline: 2px solid rgba(255,255,255,.5); outline-offset:-1px; z-index:5; }
+  .daycol:hover { background: rgba(255,255,255,.03); }
+  ::-webkit-scrollbar { height:8px; width:8px; }
+  ::-webkit-scrollbar-thumb { background:#3a3f4b; border-radius:4px; }
+  .gridline { position:absolute; left:0; right:0; border-top:1px dashed rgba(255,255,255,.07); }
+  .tab { transition: all .12s ease; }
+</style>
+</head>
+<body class="bg-[#0d0f14] text-slate-200 min-h-screen">
+<div class="max-w-[1200px] mx-auto px-6 py-7">
+
+  <header class="flex items-baseline justify-between flex-wrap gap-3 mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-white tracking-tight">timetrack</h1>
+      <p id="sub" class="text-sm text-slate-500 mt-0.5"></p>
+    </div>
+    <div id="weektabs" class="flex gap-1.5 flex-wrap"></div>
+  </header>
+
+  <div id="week" class="mb-6"></div>
+  <div id="legend" class="flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-400"></div>
+</div>
+
+<!-- drill-down modal -->
+<div id="modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-20 flex items-start justify-center overflow-auto py-8 px-4">
+  <div class="bg-[#13161d] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[1100px] p-6">
+    <div class="flex items-center justify-between mb-5">
+      <h2 id="modalTitle" class="text-lg font-semibold text-white"></h2>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/5">esc ✕</button>
+    </div>
+    <div id="modalBody" class="overflow-x-auto"></div>
+  </div>
+</div>
+
+<script>
+/*__TIMETRACK_DATA__*/
+const DATA = window.__TIMETRACK__ || {events:[],lanes:{},weeks:[],frame:{startMin:480,endMin:1020,idleTailMin:30}};
+const FRAME = DATA.frame;
+
+// ---------- colour ----------
+const PALETTE = ['#5b8def','#36c5a8','#e0a13c','#d3608a','#8a7ef0','#4bb3d9','#cf6b4b','#7bb84e','#c75fb8','#5fa3a3','#b98be0','#d99a4e'];
+const jiraColors = {};
+let colorIdx = 0;
+function colorFor(jira){
+  if(!jira) return '#3b4150';            // no-jira = grey
+  if(!(jira in jiraColors)) jiraColors[jira] = PALETTE[colorIdx++ % PALETTE.length];
+  return jiraColors[jira];
+}
+function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
+function fmt(min){ const h=Math.floor(min/60), m=Math.round(min%60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
+function dur(min){ const h=Math.floor(min/60), m=Math.round(min%60); return (h?h+'h ':'')+(m?m+'m':(h?'':'0m')); }
+
+// ---------- per-day model (latest-wins attention) ----------
+function dayEvents(date){ return DATA.events.filter(e=>e.date===date).sort((a,b)=>a.minute-b.minute); }
+
+function dayModel(date){
+  const evs = dayEvents(date);
+  if(!evs.length) return null;
+  const idle = FRAME.idleTailMin;
+  const activeStart = evs[0].minute;
+  const activeEnd = evs[evs.length-1].minute + idle;
+  let segs=[];
+  for(let i=0;i<evs.length;i++){
+    const start = evs[i].minute;
+    const end = (i<evs.length-1) ? evs[i+1].minute : activeEnd;
+    if(end<=start) continue;
+    segs.push({start,end,lane:evs[i].lane,jira:evs[i].jira,branch:evs[i].branch});
+  }
+  // merge adjacent identical lane+jira
+  const merged=[];
+  for(const s of segs){
+    const last=merged[merged.length-1];
+    if(last && last.lane===s.lane && last.jira===s.jira){ last.end=s.end; }
+    else merged.push({...s});
+  }
+  // total per jira
+  const totals={};
+  for(const s of merged){ const k=s.jira||'(no jira)'; totals[k]=(totals[k]||0)+(s.end-s.start); }
+  return {date,activeStart,activeEnd,segs:merged,evs,totals,
+          frameStart:Math.min(FRAME.startMin,activeStart),
+          frameEnd:Math.max(FRAME.endMin,activeEnd)};
+}
+
+// ---------- rendering helpers ----------
+const BAR_H = 360;
+function yFor(min,m){ return (min-m.frameStart)/(m.frameEnd-m.frameStart)*BAR_H; }
+
+function barHTML(m, segs, widthStyle){
+  let h = `<div class="relative rounded-lg bg-[#0a0c11] border border-white/5 overflow-hidden" style="height:${BAR_H}px;${widthStyle||'width:100%'}">`;
+  for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){
+    h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`;
+  }
+  for(const s of segs){
+    const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
+    const label=s.jira||laneShort(s.lane);
+    h+=`<div class="seg absolute rounded-[3px]" title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}\n${laneShort(s.lane)}${s.branch?(' ('+s.branch+')'):''}"
+         style="top:${top}px;height:${height}px;left:3px;right:3px;background:${colorFor(s.jira)}">
+         ${height>16?`<span class="text-[9px] font-semibold text-black/70 pl-1 leading-tight block truncate">${label}</span>`:''}</div>`;
+  }
+  return h+`</div>`;
+}
+
+function hourAxis(m){
+  let h=`<div class="relative mono text-[10px] text-slate-600" style="height:${BAR_H}px;width:34px">`;
+  for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){
+    const y=yFor(hr*60,m);
+    h+=`<div class="absolute right-1" style="top:${y-6}px">${String(hr).padStart(2,'0')}:00</div>`;
+  }
+  h+=`</div>`; return h;
+}
+
+// ---------- week view (day columns) ----------
+let currentWeek = (DATA.weeks.find(w=>w.isCurrent) || DATA.weeks[DATA.weeks.length-1] || {}).iso;
+
+function renderTabs(){
+  document.getElementById('weektabs').innerHTML = DATA.weeks.map(w=>`
+    <button onclick="selectWeek('${w.iso}')" class="tab px-3 py-1.5 rounded-lg text-xs font-medium border
+      ${w.iso===currentWeek?'bg-blue-500/90 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-400 hover:bg-white/10'}">
+      ${w.label}${w.isCurrent?' <span class="opacity-60">· now</span>':''}
+    </button>`).join('');
+}
+
+function renderWeek(){
+  const w = DATA.weeks.find(x=>x.iso===currentWeek);
+  if(!w){ document.getElementById('week').innerHTML='<p class="text-slate-500">No data.</p>'; return; }
+  // shared frame across the week for aligned axes
+  const models = w.days.map(d=>({d, m:dayModel(d.date)}));
+  const active = models.filter(x=>x.m);
+  const fStart = active.length?Math.min(...active.map(x=>x.m.frameStart)):FRAME.startMin;
+  const fEnd   = active.length?Math.max(...active.map(x=>x.m.frameEnd)):FRAME.endMin;
+  const shared = {frameStart:fStart, frameEnd:fEnd};
+
+  let html = `<div class="flex gap-3 items-start">${hourAxis(shared)}<div class="flex gap-3 flex-1">`;
+  for(const {d,m} of models){
+    const dayActive = m ? m.activeEnd-m.activeStart : 0;
+    html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/40':''}"
+                 onclick="openDay('${d.date}')">
+      <div class="text-center mb-2">
+        <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-300'}">${d.weekday.slice(0,3)}</div>
+        <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div>
+      </div>`;
+    if(m){
+      const segs = m.segs.map(s=>({...s, start:s.start, end:s.end}));
+      html += `<div class="flex justify-center">${barHTML({...m,frameStart:fStart,frameEnd:fEnd}, segs, 'width:100%')}</div>`;
+      html += `<div class="text-center text-[10px] text-slate-400 mono mt-1.5">${dur(dayActive)}</div>`;
+    } else {
+      html += `<div class="rounded-lg bg-[#0a0c11] border border-dashed border-white/5 flex items-center justify-center text-slate-700 text-[10px]" style="height:${BAR_H}px">—</div>
+               <div class="text-center text-[10px] text-slate-700 mono mt-1.5">·</div>`;
+    }
+    html += `</div>`;
+  }
+  html += `</div></div>`;
+  document.getElementById('week').innerHTML = html;
+}
+
+// ---------- drill-down ----------
+function openDay(date){
+  const m = dayModel(date);
+  const w = document.getElementById('modal');
+  const body = document.getElementById('modalBody');
+  document.getElementById('modalTitle').textContent =
+    new Date(date+'T00:00').toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'});
+  if(!m){ body.innerHTML='<p class="text-slate-500 py-8 text-center">No activity recorded this day.</p>'; w.classList.remove('hidden'); return; }
+
+  // lanes active that day, app lane first
+  const laneIds=[...new Set(m.segs.map(s=>s.lane))]
+    .sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0));
+
+  let cols = `<div class="flex gap-3 items-start">${hourAxis(m)}`;
+  // resolved column
+  cols += `<div><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
+           ${barHTML(m,m.segs,'width:90px')}</div>`;
+  // per-lane columns
+  for(const id of laneIds){
+    const segs=m.segs.filter(s=>s.lane===id);
+    const app=DATA.lanes[id]?.isApp;
+    cols += `<div><div class="text-center text-[10px] font-medium mb-1.5 truncate ${app?'text-amber-300':'text-slate-400'}" style="max-width:90px" title="${laneShort(id)}">
+             ${app?'★ ':''}${laneShort(id)}</div>${barHTML(m,segs,'width:90px')}</div>`;
+  }
+  cols += `</div>`;
+
+  // totals
+  const tot=Object.entries(m.totals).sort((a,b)=>b[1]-a[1]);
+  let totHTML=`<div class="mt-5 pt-4 border-t border-white/10"><div class="text-xs text-slate-500 mb-2">Rough breakdown · active ${dur(m.activeEnd-m.activeStart)} (${fmt(m.activeStart)}–${fmt(m.activeEnd)})</div>
+    <div class="flex flex-wrap gap-2">`;
+  for(const [j,mins] of tot){
+    totHTML+=`<div class="flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs">
+      <span class="w-2.5 h-2.5 rounded-sm" style="background:${colorFor(j==='(no jira)'?null:j)}"></span>
+      <span class="font-medium">${j}</span><span class="mono text-slate-400">${dur(mins)}</span></div>`;
+  }
+  totHTML+=`</div></div>`;
+
+  body.innerHTML = cols + totHTML;
+  w.classList.remove('hidden');
+}
+function closeModal(){ document.getElementById('modal').classList.add('hidden'); }
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
+
+function selectWeek(iso){ currentWeek=iso; renderTabs(); renderWeek(); renderLegend(); }
+
+function renderLegend(){
+  const jiras=[...new Set(DATA.events.map(e=>e.jira).filter(Boolean))].sort();
+  let h = jiras.map(j=>`<span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm" style="background:${colorFor(j)}"></span>${j}</span>`).join('');
+  h += `<span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm" style="background:#3b4150"></span>no jira</span>`;
+  document.getElementById('legend').innerHTML = h;
+}
+
+document.getElementById('sub').textContent =
+  `${DATA.window?.weeks||'?'} weeks · ${DATA.events.length} signals · ${Object.keys(DATA.lanes).length} worktrees · ${DATA.tz||''} · built ${new Date(DATA.generatedAt).toLocaleString()}`;
+renderTabs(); renderWeek(); renderLegend();
+</script>
+</body>
+</html>
