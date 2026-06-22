@@ -23,7 +23,7 @@
   #tip { position:fixed; z-index:50; pointer-events:none; max-width:300px; opacity:0; transition:opacity .08s ease; }
 </style>
 </head>
-<body class="bg-[#1b1f2a] text-slate-100 min-h-screen">
+<body class="text-slate-100 min-h-screen" style="background:linear-gradient(165deg,#2a3142 0%,#222838 45%,#1d222e 100%);background-attachment:fixed">
 <div class="max-w-[1240px] mx-auto px-6 py-7">
 
   <header class="flex items-baseline justify-between flex-wrap gap-3 mb-6">
@@ -34,12 +34,13 @@
     <div id="weektabs" class="flex gap-1.5 flex-wrap"></div>
   </header>
 
+  <div id="adjust" class="flex items-center gap-2 mb-4 text-xs flex-wrap"></div>
   <div id="week" class="mb-6"></div>
   <div id="legend" class="flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-300"></div>
 </div>
 
 <div id="modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-20 flex items-start justify-center overflow-auto py-8 px-4">
-  <div class="bg-[#232834] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[1120px] p-6">
+  <div class="bg-[#2b3242] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[1120px] p-6">
     <div class="flex items-center justify-between mb-5">
       <h2 id="modalTitle" class="text-lg font-semibold text-white"></h2>
       <button onclick="closeModal()" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/10">esc ✕</button>
@@ -107,23 +108,70 @@ function frameFor(date, base){
   for(const mt of meetingsForDay(date)){ if(isOn(mt)){ s=Math.min(s,mt.startMin); e=Math.max(e,mt.endMin); } }
   return {frameStart:s, frameEnd:e};
 }
+// ---------- timesheet adjustments (fit to 7:30 / round to 15m) ----------
+const FULL_DAY = 450, QUARTER = 15;
+let TT_FIT   = localStorage.getItem('tt_fit')==='1';
+let TT_ROUND = localStorage.getItem('tt_round')==='1';
+
+// largest-remainder apportionment: round each value to a multiple of QUARTER
+// so the rounded values sum exactly to `target`. One strategy, fit or no fit.
+function distribute(vals, target){
+  const tq = Math.round(target/QUARTER);
+  const floors = vals.map(v=>Math.floor(v/QUARTER));
+  let rem = tq - floors.reduce((a,b)=>a+b,0);
+  const order = vals.map((v,i)=>({i, frac:(v/QUARTER)-floors[i]})).sort((a,b)=>b.frac-a.frac);
+  const out = floors.slice();
+  for(let k=0; k<order.length && rem>0; k++){ out[order[k].i]++; rem--; }
+  for(let k=order.length-1; k>=0 && rem<0; k--){ if(out[order[k].i]>0){ out[order[k].i]--; rem++; } }
+  return out.map(q=>q*QUARTER);
+}
+
+function applyAdjust(items){
+  let arr = items.map(it=>({...it}));
+  if(TT_FIT){
+    const mt = arr.filter(i=>i.meeting).reduce((s,i)=>s+i.mins,0);
+    const nm = arr.filter(i=>!i.meeting).reduce((s,i)=>s+i.mins,0);
+    const target = Math.max(0, FULL_DAY - mt);
+    if(nm>0){ const f=target/nm; arr.forEach(i=>{ if(!i.meeting) i.mins*=f; }); }
+  }
+  if(TT_ROUND){
+    const sum = arr.reduce((s,i)=>s+i.mins,0);
+    const target = TT_FIT ? FULL_DAY : Math.round(sum/QUARTER)*QUARTER;
+    const q = distribute(arr.map(i=>i.mins), target);
+    arr.forEach((it,idx)=> it.mins=q[idx]);
+  }
+  return arr.filter(i=>i.mins>0).sort((a,b)=>b.mins-a.mins);
+}
+
 // timesheet rows for a day: each jira/no-jira + each attended meeting, with time
 function daySummary(date, segs){
   const jt={};
   for(const s of segs){ if(s.meeting) continue; const k=s.jira||'(no jira)'; jt[k]=(jt[k]||0)+(s.end-s.start); }
-  const items=[];
+  const raw=[];
   for(const k in jt){ const jira=k==='(no jira)'?null:k;
-    items.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:jt[k]}); }
+    raw.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:jt[k]}); }
   const mtgs=meetingsForDay(date);
   for(const mt of mtgs){ if(!isOn(mt)) continue;
-    items.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
-  items.sort((a,b)=>b.mins-a.mins);
+    raw.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
+  const items = applyAdjust(raw);
   return {items, things:Object.keys(jt).length, attended:mtgs.filter(isOn).length, total:mtgs.length,
           totalMins:items.reduce((s,i)=>s+i.mins,0)};
 }
 function resetToggles(){
   for(const k in MSTATE) delete MSTATE[k];
   saveMState(); renderWeek(); if(currentDay) openDay(currentDay);
+}
+function refreshAll(){ renderAdjust(); renderWeek(); if(currentDay) openDay(currentDay); }
+function renderAdjust(){
+  const el=document.getElementById('adjust'); if(!el) return;
+  const pill=(on)=> on?'bg-blue-500 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10';
+  const note = TT_FIT ? 'scaled to 7:30 (meetings fixed)' : '';
+  el.innerHTML = `<span class="text-slate-400 mr-1 font-medium">Timesheet:</span>
+    <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to 7:30</button>
+    <button id="tRound" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_ROUND)}">Round to 15m</button>
+    ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?' · 15-min chunks':''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">15-min chunks</span>`:'')}`;
+  document.getElementById('tFit').onclick=()=>{ TT_FIT=!TT_FIT; localStorage.setItem('tt_fit',TT_FIT?'1':'0'); refreshAll(); };
+  document.getElementById('tRound').onclick=()=>{ TT_ROUND=!TT_ROUND; localStorage.setItem('tt_round',TT_ROUND?'1':'0'); refreshAll(); };
 }
 function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
@@ -171,7 +219,7 @@ function yFor(min,m){ return (min-m.frameStart)/(m.frameEnd-m.frameStart)*BAR_H;
 let TIP = [];
 function barHTML(m, segs, widthStyle, opts={}){
   const detail = !!opts.detail;
-  let h = `<div class="relative rounded-lg bg-[#12151d] border border-white/10 overflow-hidden" style="height:${BAR_H}px;${widthStyle||'width:100%'}">`;
+  let h = `<div class="relative rounded-lg bg-[#252c3b] border border-white/10 overflow-hidden" style="height:${BAR_H}px;${widthStyle||'width:100%'}">`;
   for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`; }
   for(const s of segs){
     const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
@@ -198,7 +246,7 @@ function barHTML(m, segs, widthStyle, opts={}){
 }
 
 function hourAxis(m, leftPad=false){
-  let h=`<div class="relative mono text-[10px] text-slate-500" style="height:${BAR_H}px;width:${leftPad?42:34}px">`;
+  let h=`<div class="relative mono text-[10px] text-slate-400" style="height:${BAR_H}px;width:${leftPad?42:34}px">`;
   for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){
     h+=`<div class="absolute right-1" style="top:${yFor(hr*60,m)-6}px">${String(hr).padStart(2,'0')}:00</div>`;
   }
@@ -233,18 +281,18 @@ function renderWeek(){
     html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''}" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
         <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
-        <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div>
-        ${sum?`<div class="text-[9px] text-slate-500 mt-0.5">${sum.things} item${sum.things===1?'':'s'}${sum.total?` · ${sum.attended}/${sum.total} mtgs`:''}</div>`:'<div class="text-[9px] text-slate-700 mt-0.5">·</div>'}</div>`;
+        <div class="text-[10px] text-slate-400 mono">${d.short.replace(/^\w+\s/,'')}</div>
+        ${sum?`<div class="text-[10px] text-slate-400 mt-0.5">${sum.things} item${sum.things===1?'':'s'}${sum.total?` · ${sum.attended}/${sum.total} mtgs`:''}</div>`:'<div class="text-[10px] text-slate-600 mt-0.5">·</div>'}</div>`;
     if(c.has){
       html += `<div class="flex justify-center">${barHTML(shared, c.segs, 'width:100%')}</div>`;
-      html += `<div class="text-center text-[11px] text-white mono mt-1.5 font-semibold">${dur(sum.totalMins)}</div>`;
-      html += `<div class="mt-2 space-y-0.5">${sum.items.map(it=>`
-        <div class="legitem flex items-center gap-1 text-[9px]" data-jira="${it.key}">
-          <span class="w-2 h-2 rounded-sm shrink-0" style="background:${it.color}"></span>
-          <span class="truncate flex-1 ${it.meeting?'text-slate-400':'text-slate-200'}" title="${it.label}${it.sub?(' — '+it.sub):''}">${it.label}</span>
-          <span class="mono text-slate-400 shrink-0">${dur(it.mins)}</span></div>`).join('')}</div>`;
+      html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
+      html += `<div class="mt-2.5 space-y-1.5">${sum.items.map(it=>`
+        <div class="legitem flex items-baseline gap-1.5 text-[11px]" data-jira="${it.key}">
+          <span class="w-2.5 h-2.5 rounded-sm shrink-0 self-center" style="background:${it.color}"></span>
+          <span class="truncate flex-1 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}">${it.label}</span>
+          <span class="mono font-bold text-white shrink-0 text-xs">${dur(it.mins)}</span></div>`).join('')}</div>`;
     } else {
-      html += `<div class="rounded-lg bg-[#12151d] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
+      html += `<div class="rounded-lg bg-[#252c3b] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
                <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
     }
     html += `</div>`;
@@ -257,7 +305,7 @@ function renderWeek(){
 let currentDay = null;
 let MIDX = [];
 function meetingColHTML(date, mf){
-  let h=`<div class="relative rounded-lg bg-[#12151d] border border-white/10 overflow-hidden" style="height:${BAR_H}px;width:118px">`;
+  let h=`<div class="relative rounded-lg bg-[#252c3b] border border-white/10 overflow-hidden" style="height:${BAR_H}px;width:118px">`;
   for(let hr=Math.ceil(mf.frameStart/60); hr*60<=mf.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,mf)}px"></div>`; }
   for(const mt of meetingsForDay(date)){
     const on=isOn(mt), top=yFor(mt.startMin,mf), height=Math.max(3,yFor(mt.endMin,mf)-top);
@@ -399,7 +447,7 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
 document.getElementById('sub').textContent =
   `${DATA.window?.weeks||'?'} weeks · ${DATA.events.length} signals · ${Object.keys(DATA.lanes).length} worktrees · ${DATA.tz||''} · built ${new Date(DATA.generatedAt).toLocaleString()}`;
-renderTabs(); renderWeek(); renderLegend();
+renderTabs(); renderAdjust(); renderWeek(); renderLegend();
 </script>
 </body>
 </html>
