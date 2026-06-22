@@ -420,36 +420,61 @@ def collect_meetings(cfg, start_date, today):
     return meetings
 
 
+# A review only counts once you've dwelled: a session is consecutive ticks on
+# the same JIRA (gaps <= SESSION_GAP); sessions with fewer than MIN_TICKS ticks
+# are fly-by glances and get dropped. Raw ticks stay in the log so the
+# threshold can be retuned later.
+SESSION_GAP = 300   # seconds; ticks are ~75s apart
+MIN_TICKS = 2
+
+
 def collect_reviews(start_dt, end_dt):
     """GitHub PR review heartbeat ticks: <epoch>\t<jira>\t<url>\t<title>."""
-    events = []
     if not REVIEW_LOG.exists():
-        return events, {}
+        return [], {}
+    raw = []
     for line in REVIEW_LOG.read_text(errors="replace").splitlines():
         parts = line.split("\t")
         if not parts or not parts[0]:
             continue
-        epoch = parts[0]
+        try:
+            epoch = int(parts[0])
+        except ValueError:
+            continue
         jira = parts[1] if len(parts) > 1 else ""
         url = parts[2] if len(parts) > 2 else ""
         title = parts[3] if len(parts) > 3 else ""
-        try:
-            local = dt.datetime.fromtimestamp(int(epoch)).astimezone()
-        except (ValueError, OverflowError):
-            continue
+        local = dt.datetime.fromtimestamp(epoch).astimezone()
         if not (start_dt <= local <= end_dt):
             continue
-        j = jira or jira_from(title) or jira_from(url)  # re-infer if scrape missed
-        events.append({
-            "date": local.date().isoformat(),
-            "minute": local.hour * 60 + local.minute,
-            "ts": local.isoformat(),
-            "lane": REVIEW_LANE,
-            "jira": j or None,
-            "branch": None,
-            "type": "review",
-            "preview": title or url,
-        })
+        raw.append({"epoch": epoch, "local": local,
+                    "jira": jira or jira_from(title) or jira_from(url),
+                    "title": title, "url": url})
+    raw.sort(key=lambda t: t["epoch"])
+
+    # group into dwell sessions, keep only those with >= MIN_TICKS ticks
+    events = []
+    i = 0
+    while i < len(raw):
+        j = i + 1
+        while (j < len(raw) and raw[j]["epoch"] - raw[j - 1]["epoch"] <= SESSION_GAP
+               and raw[j]["jira"] == raw[i]["jira"]):
+            j += 1
+        if j - i >= MIN_TICKS:
+            for t in raw[i:j]:
+                lc = t["local"]
+                events.append({
+                    "date": lc.date().isoformat(),
+                    "minute": lc.hour * 60 + lc.minute,
+                    "ts": lc.isoformat(),
+                    "lane": REVIEW_LANE,
+                    "jira": t["jira"] or None,
+                    "branch": None,
+                    "type": "review",
+                    "preview": t["title"] or t["url"],
+                })
+        i = j
+
     lane = {REVIEW_LANE: {"id": REVIEW_LANE, "path": REVIEW_LANE, "label": "GitHub review",
                           "repo": "review", "isApp": False, "isReview": True}} if events else {}
     return events, lane
