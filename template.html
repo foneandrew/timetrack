@@ -294,12 +294,16 @@ function renderWeek(){
     if(c.has){
       html += `<div class="flex justify-center">${barHTML(shared, c.segs, 'width:100%')}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
-      html += `<div class="mt-2.5 space-y-1.5">${sum.items.map(it=>`
-        <div class="legitem flex items-baseline gap-1.5 text-[11px]" data-jira="${it.key}">
-          <span class="w-2.5 h-2.5 rounded-sm shrink-0 self-center" style="background:${it.color}"></span>
-          <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}${it.reviewOnly?' — code review':''}">${it.label}</span>
-          ${it.reviewOnly?'<span class="text-[8px] uppercase tracking-wide px-1 rounded bg-white/15 text-slate-200 shrink-0">review</span>':''}
-          <span class="mono font-bold text-white shrink-0 text-xs">${dur(it.mins)}</span></div>`).join('')}</div>`;
+      html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
+        <div class="legitem text-[11px]" data-jira="${it.key}">
+          <div class="flex items-baseline gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-sm shrink-0 self-center" style="background:${it.color}"></span>
+            <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}${it.reviewOnly?' — code review':''}">${it.label}</span>
+            ${it.reviewOnly?'<span class="text-[8px] uppercase tracking-wide px-1 rounded bg-white/15 text-slate-200 shrink-0">review</span>':''}
+            <span class="mono font-bold text-white shrink-0 text-xs">${dur(it.mins)}</span>
+          </div>
+          ${it.sub?`<div class="text-[10px] text-slate-400 truncate leading-tight" style="padding-left:18px" title="${it.sub}">${it.sub}</div>`:''}
+        </div>`).join('')}</div>`;
     } else {
       html += `<div class="rounded-lg bg-[#252c3b] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
                <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
