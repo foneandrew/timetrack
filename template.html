@@ -57,6 +57,7 @@
 const DATA = window.__TIMETRACK__ || {events:[],lanes:{},weeks:[],jiraNames:{},frame:{startMin:480,endMin:1020,idleTailMin:30}};
 const FRAME = DATA.frame;
 const NAMES = DATA.jiraNames || {};
+const REVIEW_LANE = '__github_review__';
 
 // ---------- colour ----------
 const PALETTE = ['#6ea0ff','#3fd6b6','#f0b04c','#ec7aa0','#9f93ff','#56c6ec','#e07d5c','#8fcc5e','#dd72c8','#6fbcbc','#c79bf0','#eab057'];
@@ -147,11 +148,13 @@ function applyAdjust(items){
 
 // timesheet rows for a day: each jira/no-jira + each attended meeting, with time
 function daySummary(date, segs){
-  const jt={};
-  for(const s of segs){ if(s.meeting) continue; const k=s.jira||'(no jira)'; jt[k]=(jt[k]||0)+(s.end-s.start); }
+  const jt={}, worked=new Set();
+  for(const s of segs){ if(s.meeting) continue; const k=s.jira||'(no jira)'; jt[k]=(jt[k]||0)+(s.end-s.start);
+    if(s.lane!==REVIEW_LANE && s.jira) worked.add(s.jira); }
   const raw=[];
   for(const k in jt){ const jira=k==='(no jira)'?null:k;
-    raw.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:jt[k]}); }
+    raw.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:jt[k],
+              reviewOnly: !!jira && !worked.has(jira)}); }
   const mtgs=meetingsForDay(date);
   for(const mt of mtgs){ if(!isOn(mt)) continue;
     raw.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
@@ -180,7 +183,7 @@ function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').s
 function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
 function fmt(min){ const h=Math.floor(min/60), m=Math.round(min%60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
 function dur(min){ const h=Math.floor(min/60), m=Math.round(min%60); return (h?h+'h ':'')+(m?m+'m':(h?'':'0m')); }
-function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':t)); }
+function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':(t==='review'?'PR review':t))); }
 
 // ---------- per-day model (latest-wins attention) ----------
 function dayEvents(date){ return DATA.events.filter(e=>e.date===date).sort((a,b)=>a.minute-b.minute); }
@@ -291,7 +294,8 @@ function renderWeek(){
       html += `<div class="mt-2.5 space-y-1.5">${sum.items.map(it=>`
         <div class="legitem flex items-baseline gap-1.5 text-[11px]" data-jira="${it.key}">
           <span class="w-2.5 h-2.5 rounded-sm shrink-0 self-center" style="background:${it.color}"></span>
-          <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}">${it.label}</span>
+          <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}${it.reviewOnly?' — code review':''}">${it.label}</span>
+          ${it.reviewOnly?'<span class="text-[8px] uppercase tracking-wide px-1 rounded bg-white/15 text-slate-200 shrink-0">review</span>':''}
           <span class="mono font-bold text-white shrink-0 text-xs">${dur(it.mins)}</span></div>`).join('')}</div>`;
     } else {
       html += `<div class="rounded-lg bg-[#252c3b] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>

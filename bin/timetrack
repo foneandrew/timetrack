@@ -24,6 +24,8 @@ from pathlib import Path
 HOME = Path.home()
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 GCOD_LOG = HOME / ".timetrack" / "checkouts.log"  # written by the gco/gcod wrapper
+REVIEW_LOG = HOME / ".timetrack" / "review.log"   # written by the browser extension host
+REVIEW_LANE = "__github_review__"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 TEMPLATE = Path(__file__).resolve().parent.parent / "template.html"
 OUT = Path(__file__).resolve().parent.parent / "out" / "timetrack.html"
@@ -418,6 +420,41 @@ def collect_meetings(cfg, start_date, today):
     return meetings
 
 
+def collect_reviews(start_dt, end_dt):
+    """GitHub PR review heartbeat ticks: <epoch>\t<jira>\t<url>\t<title>."""
+    events = []
+    if not REVIEW_LOG.exists():
+        return events, {}
+    for line in REVIEW_LOG.read_text(errors="replace").splitlines():
+        parts = line.split("\t")
+        if not parts or not parts[0]:
+            continue
+        epoch = parts[0]
+        jira = parts[1] if len(parts) > 1 else ""
+        url = parts[2] if len(parts) > 2 else ""
+        title = parts[3] if len(parts) > 3 else ""
+        try:
+            local = dt.datetime.fromtimestamp(int(epoch)).astimezone()
+        except (ValueError, OverflowError):
+            continue
+        if not (start_dt <= local <= end_dt):
+            continue
+        j = jira or jira_from(title) or jira_from(url)  # re-infer if scrape missed
+        events.append({
+            "date": local.date().isoformat(),
+            "minute": local.hour * 60 + local.minute,
+            "ts": local.isoformat(),
+            "lane": REVIEW_LANE,
+            "jira": j or None,
+            "branch": None,
+            "type": "review",
+            "preview": title or url,
+        })
+    lane = {REVIEW_LANE: {"id": REVIEW_LANE, "path": REVIEW_LANE, "label": "GitHub review",
+                          "repo": "review", "isApp": False, "isReview": True}} if events else {}
+    return events, lane
+
+
 def build_weeks(start_date, today):
     """Mon–Fri columns per ISO week across the window."""
     weeks = []
@@ -458,9 +495,10 @@ def main():
 
     p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
     c_events, c_lanes = collect_checkouts(start_dt, end_dt, app_paths)
+    r_events, r_lanes = collect_reviews(start_dt, end_dt)
 
-    lanes = {**p_lanes, **c_lanes}
-    events = sorted(p_events + c_events, key=lambda e: e["ts"])
+    lanes = {**p_lanes, **c_lanes, **r_lanes}
+    events = sorted(p_events + c_events + r_events, key=lambda e: e["ts"])
 
     blob = {
         "generatedAt": end_dt.isoformat(),

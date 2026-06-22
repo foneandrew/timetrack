@@ -72,7 +72,32 @@ calendar URL). Keys:
 - `skip_meetings` — title substrings that default to OFF.
 - `jira_names` — override the auto-derived JIRA names.
 
+## GitHub review (browser extension)
+
+`extension/` is an MV3 browser extension that logs **active** PR-review time —
+it emits a heartbeat tick every ~75s only while a GitHub PR page is the genuine
+foreground tab (visible + focused), so a parked tab doesn't count. Ticks land in
+`~/.timetrack/review.log` and the builder stitches them into review intervals on
+a synthetic `GitHub review` lane.
+
+Review time attaches to the PR's JIRA (inferred from branch/title, re-inferred in
+the builder from the logged title/url if the scrape missed). If that JIRA has no
+worktree activity that day, the row is badged **review** (you reviewed someone
+else's ticket); otherwise it folds into your own work on it.
+
+Wiring (a Chrome extension can't write to disk, so a native-messaging host bridges it):
+1. `chrome://extensions` → enable Developer mode → **Load unpacked** → pick `extension/`.
+2. Copy the extension's **ID**, then run `extension/install-host.sh <id>` (registers
+   the host in every Chromium-family browser found).
+3. Reload the extension. Click its toolbar icon once — it writes a `TEST-1` line to
+   `~/.timetrack/review.log` to prove the bridge. Delete that line (or the file) before real use.
+
+Test the host alone (no extension needed):
+```bash
+python3 -c 'import struct,sys,json; m=json.dumps({"epoch":1,"jira":"PBL-1"}).encode(); sys.stdout.buffer.write(struct.pack("<I",len(m))+m)' | bin/timetrack-review-host
+```
+
 ## Not yet wired (fast-follows)
 - Per-JIRA totals in the week view; days-as-rows table shell.
-- Clockify project mapping; Chrome PR-view signal; shell-heartbeat + commit signals.
+- Clockify project mapping; Jira page-view signal; shell-heartbeat + commit signals.
 - RRULE edge cases beyond WEEKLY/DAILY/MONTHLY; all-day events on the timeline.

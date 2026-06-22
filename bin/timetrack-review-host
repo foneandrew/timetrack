@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Native messaging host for the timetrack review extension.
+
+Chrome spawns this on demand, hands it ONE framed message, we append a tick
+line to ~/.timetrack/review.log and exit. No daemon.
+
+Native messaging framing: 4-byte little-endian length prefix + UTF-8 JSON,
+on both read and write. CRITICAL: nothing may go to stdout except framed
+responses — a stray print corrupts the protocol. Debug goes to stderr.
+
+Log line: <epoch>\t<jira>\t<url>\t<title>
+"""
+import sys
+import struct
+import json
+import os
+import time
+from pathlib import Path
+
+LOG = Path.home() / ".timetrack" / "review.log"
+
+
+def read_message():
+    raw_len = sys.stdin.buffer.read(4)
+    if len(raw_len) < 4:
+        return None
+    n = struct.unpack("<I", raw_len)[0]
+    data = sys.stdin.buffer.read(n)
+    try:
+        return json.loads(data.decode("utf-8"))
+    except Exception as e:
+        print(f"timetrack-review-host: bad payload: {e}", file=sys.stderr)
+        return None
+
+
+def send_message(obj):
+    data = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack("<I", len(data)))
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+
+def clean(s):
+    return " ".join(str(s if s is not None else "").split())
+
+
+def main():
+    msg = read_message()
+    if not msg:
+        return
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        epoch = int(msg.get("epoch") or time.time())
+        line = "\t".join([str(epoch), clean(msg.get("jira")), clean(msg.get("url")), clean(msg.get("title"))])
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+        send_message({"ok": True})
+    except Exception as e:
+        print(f"timetrack-review-host: write failed: {e}", file=sys.stderr)
+        send_message({"ok": False, "error": str(e)})
+
+
+if __name__ == "__main__":
+    main()

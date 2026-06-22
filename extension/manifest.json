@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "timetrack review logger",
+  "version": "1.0.0",
+  "description": "Logs active GitHub PR review time as heartbeat ticks for timetrack.",
+  "permissions": ["nativeMessaging"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "timetrack: send a test review tick" },
+  "content_scripts": [
+    {
+      "matches": ["https://github.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
