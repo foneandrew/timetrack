@@ -19,10 +19,13 @@ function foreground() {
 }
 
 function inferJira() {
-  const title = (document.querySelector(".js-issue-title")?.textContent || document.title || "");
-  const branchEl = document.querySelector(".head-ref") || document.querySelector('[class*="head-ref"]');
-  const branch = branchEl ? branchEl.textContent : "";
-  const m = (branch + " " + title).match(/([A-Za-z]+-\d+)/);
+  // PR title leads (curated, e.g. "PBL-7317 ..."); branch names back it up.
+  // A PR has two BranchName elements (base + head) — base is usually `main`
+  // with no JIRA, so the first regex match across them is the head's ticket.
+  const title = document.querySelector(".js-issue-title")?.textContent || document.title || "";
+  const branches = [...document.querySelectorAll('[data-component="BranchName"]')]
+    .map(e => e.textContent || "").join(" ");
+  const m = (title + " " + branches).match(/([A-Za-z]+-\d+)/);
   return m ? m[1].toUpperCase() : "";
 }
 
