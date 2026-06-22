@@ -107,6 +107,24 @@ function frameFor(date, base){
   for(const mt of meetingsForDay(date)){ if(isOn(mt)){ s=Math.min(s,mt.startMin); e=Math.max(e,mt.endMin); } }
   return {frameStart:s, frameEnd:e};
 }
+// timesheet rows for a day: each jira/no-jira + each attended meeting, with time
+function daySummary(date, segs){
+  const jt={};
+  for(const s of segs){ if(s.meeting) continue; const k=s.jira||'(no jira)'; jt[k]=(jt[k]||0)+(s.end-s.start); }
+  const items=[];
+  for(const k in jt){ const jira=k==='(no jira)'?null:k;
+    items.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:jt[k]}); }
+  const mtgs=meetingsForDay(date);
+  for(const mt of mtgs){ if(!isOn(mt)) continue;
+    items.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
+  items.sort((a,b)=>b.mins-a.mins);
+  return {items, things:Object.keys(jt).length, attended:mtgs.filter(isOn).length, total:mtgs.length,
+          totalMins:items.reduce((s,i)=>s+i.mins,0)};
+}
+function resetToggles(){
+  for(const k in MSTATE) delete MSTATE[k];
+  saveMState(); renderWeek(); if(currentDay) openDay(currentDay);
+}
 function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
 function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
@@ -211,13 +229,20 @@ function renderWeek(){
   let html = `<div class="flex gap-3 items-start">${hourAxis(shared)}<div class="flex gap-3 flex-1">`;
   for(const c of cells){
     const d=c.d;
+    const sum = c.has ? daySummary(d.date, c.segs) : null;
     html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''}" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
         <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
-        <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div></div>`;
+        <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div>
+        ${sum?`<div class="text-[9px] text-slate-500 mt-0.5">${sum.things} item${sum.things===1?'':'s'}${sum.total?` · ${sum.attended}/${sum.total} mtgs`:''}</div>`:'<div class="text-[9px] text-slate-700 mt-0.5">·</div>'}</div>`;
     if(c.has){
       html += `<div class="flex justify-center">${barHTML(shared, c.segs, 'width:100%')}</div>`;
-      html += `<div class="text-center text-[10px] text-slate-300 mono mt-1.5">${c.m?dur(c.m.activeEnd-c.m.activeStart):'mtgs'}</div>`;
+      html += `<div class="text-center text-[11px] text-white mono mt-1.5 font-semibold">${dur(sum.totalMins)}</div>`;
+      html += `<div class="mt-2 space-y-0.5">${sum.items.map(it=>`
+        <div class="legitem flex items-center gap-1 text-[9px]" data-jira="${it.key}">
+          <span class="w-2 h-2 rounded-sm shrink-0" style="background:${it.color}"></span>
+          <span class="truncate flex-1 ${it.meeting?'text-slate-400':'text-slate-200'}" title="${it.label}${it.sub?(' — '+it.sub):''}">${it.label}</span>
+          <span class="mono text-slate-400 shrink-0">${dur(it.mins)}</span></div>`).join('')}</div>`;
     } else {
       html += `<div class="rounded-lg bg-[#12151d] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
                <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
@@ -363,8 +388,10 @@ function renderLegend(){
   h += `<span class="legitem flex items-center gap-1.5" data-jira="__none__"><span class="w-3 h-3 rounded-sm" style="background:${NOJIRA}"></span><span class="text-slate-400">no jira</span></span>`;
   if((DATA.meetings||[]).length){
     h += `<span class="legitem flex items-center gap-1.5" data-jira="__meeting__"><span class="w-3 h-3 rounded-sm" style="background:${MEETING};background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.3) 0 3px,transparent 3px 6px)"></span><span class="text-slate-400">meeting</span></span>`;
+    h += `<button id="resetMtg" class="ml-auto text-[11px] text-slate-500 hover:text-slate-300 underline">reset meeting toggles</button>`;
   }
   document.getElementById('legend').innerHTML = h;
+  const rb=document.getElementById('resetMtg'); if(rb) rb.onclick=resetToggles;
   wireHover();
 }
 
