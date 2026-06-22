@@ -25,7 +25,27 @@ normalises everything to **local time**, and injects a JSON blob into
   `promptSource: typed` (so ralph's autonomous `sdk` prompts are excluded). Each
   carries a timestamp + `cwd` (→ worktree → JIRA). These survive worktree deletion.
 - **gco/gcod checkouts** — appended to `~/.timetrack/checkouts.log` by the shell
-  wrapper (see below). Closes the gap where bare `gcod` (fzf) loses the branch name.
+  wrapper (see *Shell logging* below). Closes the gap where bare `gcod` (fzf)
+  resolves the branch to a SHA and loses the name.
+
+## Shell logging (gco/gcod)
+
+`gco`/`gcod` in `~/.zshrc` are wrapped to record the branch you select. A
+fail-safe helper logs `epoch ⇥ cwd ⇥ branch ⇥ action`; a logging error can
+never change the checkout's behaviour:
+
+```zsh
+_timetrack_log () {  # $1 = action (gco|gcod), $2 = branch
+  { mkdir -p "$HOME/.timetrack" && \
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$PWD" "$2" "$1" >> "$HOME/.timetrack/checkouts.log"; } 2>/dev/null
+  return 0
+}
+# ...then each checkout fn ends with:  && _timetrack_log gcod "$branch"
+```
+
+Only affects shells opened *after* the edit — run `source ~/.zshrc` or open a new
+tab to start logging now. A timestamped backup of the original sits at
+`~/.zshrc.bak.timetrack-*`.
 
 **Attention model:** latest-wins, no mid-day gaps. The lane you last acted in stays
 active until your next event lands in a different lane. The day runs from your first
