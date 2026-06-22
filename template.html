@@ -23,8 +23,9 @@
   #tip { position:fixed; z-index:50; pointer-events:none; max-width:300px; opacity:0; transition:opacity .08s ease; }
 </style>
 </head>
-<body class="text-slate-100 min-h-screen" style="background:linear-gradient(165deg,#2a3142 0%,#222838 45%,#1d222e 100%);background-attachment:fixed">
-<div class="max-w-[1240px] mx-auto px-6 py-7">
+<body class="text-slate-100 min-h-screen" style="background:#1c2029">
+<div id="bg" style="position:fixed;inset:0;z-index:-1;pointer-events:none;filter:blur(95px) saturate(1.3);transform:scale(1.35);transition:background-image .7s ease"></div>
+<div class="max-w-[1240px] mx-auto px-6 py-7 relative">
 
   <header class="flex items-baseline justify-between flex-wrap gap-3 mb-6">
     <div>
@@ -75,6 +76,7 @@ function colorFor(jira){
   return jiraColors[jira];
 }
 function nameFor(jira){ if(jira==='__meeting__') return 'meeting'; return jira ? (NAMES[jira] || '') : 'no jira'; }
+function hexA(hex,a){ const n=parseInt(hex.slice(1),16); return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`; }
 
 // ---------- meetings (toggle state persisted in localStorage) ----------
 const MSTATE = (()=>{ try { return JSON.parse(localStorage.getItem('tt_meetings')||'{}'); } catch(e){ return {}; } })();
@@ -278,7 +280,7 @@ function renderWeek(){
   for(const c of cells){
     const d=c.d;
     const sum = c.has ? daySummary(d.date, c.segs) : null;
-    html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''}" onclick="openDay('${d.date}')">
+    html += `<div class="daycol flex-1 min-w-0 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''}" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
         <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
         <div class="text-[10px] text-slate-400 mono">${d.short.replace(/^\w+\s/,'')}</div>
@@ -289,7 +291,7 @@ function renderWeek(){
       html += `<div class="mt-2.5 space-y-1.5">${sum.items.map(it=>`
         <div class="legitem flex items-baseline gap-1.5 text-[11px]" data-jira="${it.key}">
           <span class="w-2.5 h-2.5 rounded-sm shrink-0 self-center" style="background:${it.color}"></span>
-          <span class="truncate flex-1 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}">${it.label}</span>
+          <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}">${it.label}</span>
           <span class="mono font-bold text-white shrink-0 text-xs">${dur(it.mins)}</span></div>`).join('')}</div>`;
     } else {
       html += `<div class="rounded-lg bg-[#252c3b] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
@@ -427,7 +429,26 @@ function setHiKey(key){
   });
 }
 
-function selectWeek(iso){ currentWeek=iso; renderTabs(); renderWeek(); renderLegend(); }
+// classy colour wash behind everything, built from the week's busiest colours
+const BG_SPOTS=[[12,16],[86,12],[80,74],[16,82],[52,42],[42,6]];
+function weekPalette(week){
+  const tally={};
+  for(const d of week.days){
+    const m=dayModel(d.date);
+    const sum=daySummary(d.date, overlay(m?m.segs:[], d.date));
+    for(const it of sum.items) tally[it.color]=(tally[it.color]||0)+it.mins;
+  }
+  return Object.entries(tally).sort((a,b)=>b[1]-a[1]).slice(0,6).map(e=>e[0]);
+}
+function applyBg(iso){
+  const bg=document.getElementById('bg'); if(!bg) return;
+  const week=DATA.weeks.find(w=>w.iso===iso);
+  const cols=week?weekPalette(week):[];
+  bg.style.backgroundImage = cols.length
+    ? cols.map((c,i)=>{ const [x,y]=BG_SPOTS[i%BG_SPOTS.length]; return `radial-gradient(42% 42% at ${x}% ${y}%, ${hexA(c,0.5)} 0%, transparent 100%)`; }).join(',')
+    : 'none';
+}
+function selectWeek(iso){ currentWeek=iso; renderTabs(); applyBg(iso); renderWeek(); renderLegend(); }
 function renderLegend(){
   const jiras=[...new Set(DATA.events.map(e=>e.jira).filter(Boolean))].sort();
   let h = jiras.map(j=>`<span class="legitem flex items-center gap-1.5" data-jira="${keyOf(j)}" style="color:${colorFor(j)}">
@@ -447,7 +468,7 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
 document.getElementById('sub').textContent =
   `${DATA.window?.weeks||'?'} weeks · ${DATA.events.length} signals · ${Object.keys(DATA.lanes).length} worktrees · ${DATA.tz||''} · built ${new Date(DATA.generatedAt).toLocaleString()}`;
-renderTabs(); renderAdjust(); renderWeek(); renderLegend();
+renderTabs(); renderAdjust(); applyBg(currentWeek); renderWeek(); renderLegend();
 </script>
 </body>
 </html>
