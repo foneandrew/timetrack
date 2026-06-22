@@ -60,6 +60,12 @@ const NAMES = DATA.jiraNames || {};
 const PALETTE = ['#6ea0ff','#3fd6b6','#f0b04c','#ec7aa0','#9f93ff','#56c6ec','#e07d5c','#8fcc5e','#dd72c8','#6fbcbc','#c79bf0','#eab057'];
 const NOJIRA = '#5b6478';
 const MEETING = '#b388f0';
+const MEETING_PALETTE = ['#b388f0','#e07ad0','#8e9bf0','#c792ea','#f08ab0','#9d7ce0','#d3a4f5','#7e8ce8','#dd8fd6','#a9a0f2'];
+const meetingColors = {}; let mIdx = 0;
+function meetingColorFor(title){
+  if(!(title in meetingColors)) meetingColors[title] = MEETING_PALETTE[mIdx++ % MEETING_PALETTE.length];
+  return meetingColors[title];
+}
 const jiraColors = {}; let colorIdx = 0;
 function colorFor(jira){
   if(jira==='__meeting__') return MEETING;
@@ -152,19 +158,22 @@ function barHTML(m, segs, widthStyle, opts={}){
   for(const s of segs){
     const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
     const label = s.meeting ? s.title : (s.jira||laneShort(s.lane));
+    const segColor = s.meeting ? meetingColorFor(s.title) : colorFor(s.jira);
     const stripe = s.meeting ? 'background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);' : '';
+    const textCol = s.meeting ? 'rgba(0,0,0,.72)' : textOn(s.jira);
     let attrs = `data-jira="${keyOf(s.jira)}"`;
     if(detail){ const idx=TIP.push(s)-1; attrs += ` data-tip="${idx}"`; }
     else { attrs += ` title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}"`; }
     h+=`<div class="seg absolute rounded-[3px]" ${attrs}
-         style="top:${top}px;height:${height}px;left:3px;right:3px;background:${colorFor(s.jira)};${stripe}">
-         ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${textOn(s.jira)}">${label}</span>`:''}</div>`;
+         style="top:${top}px;height:${height}px;left:3px;right:3px;background:${segColor};${stripe}">
+         ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${textCol}">${label}</span>`:''}</div>`;
   }
   if(detail && opts.events){
     for(const e of opts.events){
       const y=yFor(e.minute,m);
       const isPrompt = e.type==='prompt';
-      h+=`<div class="notch" style="top:${y-3}px;left:-9px;width:7px;height:7px;${isPrompt?'border-radius:50%':'transform:rotate(45deg)'};background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.6)" title="${fmt(e.minute)} ${typeLabel(e.type)}"></div>`;
+      h+=`<div class="notch" title="${fmt(e.minute)} ${typeLabel(e.type)}"
+           style="top:${y-4}px;left:2px;width:8px;height:8px;z-index:7;${isPrompt?'border-radius:50%':'transform:rotate(45deg)'};background:#fff;box-shadow:0 0 0 1.5px rgba(0,0,0,.75)"></div>`;
     }
   }
   return h+`</div>`;
@@ -227,14 +236,15 @@ function meetingColHTML(date, mf){
   for(let hr=Math.ceil(mf.frameStart/60); hr*60<=mf.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,mf)}px"></div>`; }
   for(const mt of meetingsForDay(date)){
     const on=isOn(mt), top=yFor(mt.startMin,mf), height=Math.max(3,yFor(mt.endMin,mf)-top);
+    const col=meetingColorFor(mt.title);
     const idx=MIDX.push(mt)-1;
+    const tipIdx=TIP.push({meeting:true,title:mt.title,start:mt.startMin,end:mt.endMin,busy:mt.busy,on})-1;
     const fill = on
-      ? `background:${MEETING};background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);`
-      : `background:transparent;border:1px dashed ${MEETING};opacity:.5;`;
-    h+=`<div data-mid="${idx}" class="absolute rounded-[3px] cursor-pointer hover:brightness-110"
-         title="${mt.title} · ${fmt(mt.startMin)}–${fmt(mt.endMin)} · ${mt.busy.toLowerCase()} — click to ${on?'exclude':'include'}"
+      ? `background:${col};background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);`
+      : `background:transparent;border:1px dashed ${col};opacity:.5;`;
+    h+=`<div data-mid="${idx}" data-tip="${tipIdx}" data-jira="__meeting__" class="seg absolute rounded-[3px] cursor-pointer"
          style="top:${top}px;height:${height}px;left:3px;right:3px;${fill}">
-         ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${on?'rgba(0,0,0,.72)':MEETING}">${mt.title}</span>`:''}</div>`;
+         ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${on?'rgba(0,0,0,.72)':col}">${mt.title}</span>`:''}</div>`;
   }
   return h+`</div>`;
 }
@@ -296,7 +306,10 @@ function showTip(seg, x, y){
   let head, line3;
   if(seg.meeting){
     head = seg.title;
-    line3 = 'calendar meeting · click in the Meetings column to toggle';
+    line3 = 'calendar meeting';
+    if(seg.busy) line3 += ' · ' + seg.busy.toLowerCase();
+    if('on' in seg) line3 += seg.on ? ' · included' : ' · excluded';
+    line3 += '\n↪ click in the Meetings column to toggle';
   } else {
     head = seg.jira ? `${seg.jira} · ${nameFor(seg.jira)}` : (nameFor(null)+' · '+laneShort(seg.lane));
     line3 = `${seg.events.length} event${seg.events.length===1?'':'s'} · ${laneShort(seg.lane)}`;
