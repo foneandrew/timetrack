@@ -18,7 +18,6 @@
   .gridline { position:absolute; left:0; right:0; border-top:1px dashed rgba(255,255,255,.10); pointer-events:none; }
   .dim { opacity:.18 !important; }
   .legitem { transition: opacity .12s ease; cursor: default; }
-  .legitem.hi { text-shadow:0 0 10px currentColor; }
   .tab { transition: all .12s ease; }
   .notch { position:absolute; pointer-events:none; }
   #tip { position:fixed; z-index:50; pointer-events:none; max-width:300px; opacity:0; transition:opacity .08s ease; }
@@ -60,13 +59,48 @@ const NAMES = DATA.jiraNames || {};
 // ---------- colour ----------
 const PALETTE = ['#6ea0ff','#3fd6b6','#f0b04c','#ec7aa0','#9f93ff','#56c6ec','#e07d5c','#8fcc5e','#dd72c8','#6fbcbc','#c79bf0','#eab057'];
 const NOJIRA = '#5b6478';
+const MEETING = '#b388f0';
 const jiraColors = {}; let colorIdx = 0;
 function colorFor(jira){
+  if(jira==='__meeting__') return MEETING;
   if(!jira) return NOJIRA;
   if(!(jira in jiraColors)) jiraColors[jira] = PALETTE[colorIdx++ % PALETTE.length];
   return jiraColors[jira];
 }
-function nameFor(jira){ return jira ? (NAMES[jira] || '') : 'no jira'; }
+function nameFor(jira){ if(jira==='__meeting__') return 'meeting'; return jira ? (NAMES[jira] || '') : 'no jira'; }
+
+// ---------- meetings (toggle state persisted in localStorage) ----------
+const MSTATE = (()=>{ try { return JSON.parse(localStorage.getItem('tt_meetings')||'{}'); } catch(e){ return {}; } })();
+function saveMState(){ try { localStorage.setItem('tt_meetings', JSON.stringify(MSTATE)); } catch(e){} }
+function meetingsForDay(date){ return (DATA.meetings||[]).filter(m=>m.date===date).sort((a,b)=>a.startMin-b.startMin); }
+function isOn(m){ return (m.id in MSTATE) ? MSTATE[m.id] : m.defaultOn; }
+function toggleMeeting(id){
+  const m=(DATA.meetings||[]).find(x=>x.id===id); if(!m) return;
+  MSTATE[id]=!isOn(m); saveMState();
+  if(currentDay) openDay(currentDay);   // refresh modal
+  renderWeek();                          // refresh week behind
+}
+// meetings win during their slot; task timeline underneath resumes after
+function overlay(baseSegs, date){
+  let segs = baseSegs.map(s=>({...s}));
+  for(const mt of meetingsForDay(date)){
+    if(!isOn(mt)) continue;
+    const out=[];
+    for(const s of segs){
+      if(s.end<=mt.startMin || s.start>=mt.endMin){ out.push(s); continue; }
+      if(s.start<mt.startMin) out.push({...s,end:mt.startMin});
+      if(s.end>mt.endMin)     out.push({...s,start:mt.endMin});
+    }
+    out.push({start:mt.startMin,end:mt.endMin,meeting:true,title:mt.title,id:mt.id,jira:'__meeting__'});
+    segs=out;
+  }
+  return segs.sort((a,b)=>a.start-b.start);
+}
+function frameFor(date, base){
+  let s = base?base.frameStart:FRAME.startMin, e = base?base.frameEnd:FRAME.endMin;
+  for(const mt of meetingsForDay(date)){ if(isOn(mt)){ s=Math.min(s,mt.startMin); e=Math.max(e,mt.endMin); } }
+  return {frameStart:s, frameEnd:e};
+}
 function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
 function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
@@ -117,12 +151,13 @@ function barHTML(m, segs, widthStyle, opts={}){
   for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`; }
   for(const s of segs){
     const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
-    const label=s.jira||laneShort(s.lane);
+    const label = s.meeting ? s.title : (s.jira||laneShort(s.lane));
+    const stripe = s.meeting ? 'background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);' : '';
     let attrs = `data-jira="${keyOf(s.jira)}"`;
     if(detail){ const idx=TIP.push(s)-1; attrs += ` data-tip="${idx}"`; }
     else { attrs += ` title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}"`; }
     h+=`<div class="seg absolute rounded-[3px]" ${attrs}
-         style="top:${top}px;height:${height}px;left:3px;right:3px;background:${colorFor(s.jira)}">
+         style="top:${top}px;height:${height}px;left:3px;right:3px;background:${colorFor(s.jira)};${stripe}">
          ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${textOn(s.jira)}">${label}</span>`:''}</div>`;
   }
   if(detail && opts.events){
@@ -154,21 +189,26 @@ function renderTabs(){
 function renderWeek(){
   const w = DATA.weeks.find(x=>x.iso===currentWeek);
   if(!w){ document.getElementById('week').innerHTML='<p class="text-slate-400">No data.</p>'; return; }
-  const models = w.days.map(d=>({d, m:dayModel(d.date)}));
-  const active = models.filter(x=>x.m);
-  const fStart = active.length?Math.min(...active.map(x=>x.m.frameStart)):FRAME.startMin;
-  const fEnd   = active.length?Math.max(...active.map(x=>x.m.frameEnd)):FRAME.endMin;
+  const cells = w.days.map(d=>{
+    const m = dayModel(d.date);
+    const segs = overlay(m?m.segs:[], d.date);
+    return {d, m, segs, fr:frameFor(d.date, m), has: !!m || segs.length>0};
+  });
+  const act = cells.filter(c=>c.has);
+  const fStart = act.length?Math.min(...act.map(c=>c.fr.frameStart)):FRAME.startMin;
+  const fEnd   = act.length?Math.max(...act.map(c=>c.fr.frameEnd)):FRAME.endMin;
   const shared = {frameStart:fStart, frameEnd:fEnd};
 
   let html = `<div class="flex gap-3 items-start">${hourAxis(shared)}<div class="flex gap-3 flex-1">`;
-  for(const {d,m} of models){
+  for(const c of cells){
+    const d=c.d;
     html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''}" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
         <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
         <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div></div>`;
-    if(m){
-      html += `<div class="flex justify-center">${barHTML({...m,frameStart:fStart,frameEnd:fEnd}, m.segs, 'width:100%')}</div>`;
-      html += `<div class="text-center text-[10px] text-slate-300 mono mt-1.5">${dur(m.activeEnd-m.activeStart)}</div>`;
+    if(c.has){
+      html += `<div class="flex justify-center">${barHTML(shared, c.segs, 'width:100%')}</div>`;
+      html += `<div class="text-center text-[10px] text-slate-300 mono mt-1.5">${c.m?dur(c.m.activeEnd-c.m.activeStart):'mtgs'}</div>`;
     } else {
       html += `<div class="rounded-lg bg-[#12151d] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
                <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
@@ -180,59 +220,93 @@ function renderWeek(){
 }
 
 // ---------- drill-down ----------
+let currentDay = null;
+let MIDX = [];
+function meetingColHTML(date, mf){
+  let h=`<div class="relative rounded-lg bg-[#12151d] border border-white/10 overflow-hidden" style="height:${BAR_H}px;width:118px">`;
+  for(let hr=Math.ceil(mf.frameStart/60); hr*60<=mf.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,mf)}px"></div>`; }
+  for(const mt of meetingsForDay(date)){
+    const on=isOn(mt), top=yFor(mt.startMin,mf), height=Math.max(3,yFor(mt.endMin,mf)-top);
+    const idx=MIDX.push(mt)-1;
+    const fill = on
+      ? `background:${MEETING};background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);`
+      : `background:transparent;border:1px dashed ${MEETING};opacity:.5;`;
+    h+=`<div data-mid="${idx}" class="absolute rounded-[3px] cursor-pointer hover:brightness-110"
+         title="${mt.title} · ${fmt(mt.startMin)}–${fmt(mt.endMin)} · ${mt.busy.toLowerCase()} — click to ${on?'exclude':'include'}"
+         style="top:${top}px;height:${height}px;left:3px;right:3px;${fill}">
+         ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${on?'rgba(0,0,0,.72)':MEETING}">${mt.title}</span>`:''}</div>`;
+  }
+  return h+`</div>`;
+}
+
 function openDay(date){
+  currentDay = date;
   const m = dayModel(date);
+  const mtgs = meetingsForDay(date);
   const modal = document.getElementById('modal'), body = document.getElementById('modalBody');
   document.getElementById('modalTitle').textContent =
     new Date(date+'T00:00').toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'});
-  if(!m){ body.innerHTML='<p class="text-slate-400 py-8 text-center">No activity recorded this day.</p>'; modal.classList.remove('hidden'); return; }
-  TIP = [];
-  const laneIds=[...new Set(m.segs.map(s=>s.lane))].sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0));
+  if(!m && !mtgs.length){ body.innerHTML='<p class="text-slate-400 py-8 text-center">No activity recorded this day.</p>'; modal.classList.remove('hidden'); return; }
+  TIP = []; MIDX = [];
+  const mf = frameFor(date, m);
+  const rsegs = overlay(m?m.segs:[], date);
 
-  let cols = `<div class="flex gap-4 items-start">${hourAxis(m,true)}`;
+  let cols = `<div class="flex gap-4 items-start">${hourAxis(mf,true)}`;
   cols += `<div class="pl-1"><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
-           ${barHTML(m,m.segs,'width:96px',{detail:true,events:m.evs})}</div>`;
+           ${barHTML(mf,rsegs,'width:96px',{detail:true,events:m?m.evs:[]})}</div>`;
+  if(mtgs.length){
+    cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${MEETING}">Meetings</div>${meetingColHTML(date,mf)}</div>`;
+  }
+  const laneIds = m ? [...new Set(m.segs.map(s=>s.lane))].sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0)) : [];
   for(const id of laneIds){
     const segs=m.segs.filter(s=>s.lane===id);
     const laneEvs=m.evs.filter(e=>e.lane===id);
     const app=DATA.lanes[id]?.isApp;
     cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5 truncate ${app?'text-amber-300':'text-slate-300'}" style="max-width:96px" title="${laneShort(id)}">
-             ${app?'★ ':''}${laneShort(id)}</div>${barHTML(m,segs,'width:96px',{detail:true,events:laneEvs})}</div>`;
+             ${app?'★ ':''}${laneShort(id)}</div>${barHTML(mf,segs,'width:96px',{detail:true,events:laneEvs})}</div>`;
   }
   cols += `</div>`;
 
-  const tot=Object.entries(m.totals).sort((a,b)=>b[1]-a[1]);
+  const rtot={};
+  for(const s of rsegs){ const k=s.meeting?'__meeting__':(s.jira||'(no jira)'); rtot[k]=(rtot[k]||0)+(s.end-s.start); }
+  const tot=Object.entries(rtot).sort((a,b)=>b[1]-a[1]);
+  const span = rsegs.length ? `active ${dur(rsegs[rsegs.length-1].end-rsegs[0].start)} (${fmt(rsegs[0].start)}–${fmt(rsegs[rsegs.length-1].end)})` : '';
   let totHTML=`<div class="mt-5 pt-4 border-t border-white/10">
-    <div class="text-xs text-slate-400 mb-2">Rough breakdown · active ${dur(m.activeEnd-m.activeStart)} (${fmt(m.activeStart)}–${fmt(m.activeEnd)}) · ● prompt ◆ checkout</div>
+    <div class="text-xs text-slate-400 mb-2">Rough breakdown · ${span} · ● prompt ◆ checkout · ▦ meeting (click to toggle)</div>
     <div class="flex flex-wrap gap-2">`;
   for(const [j,mins] of tot){
-    const jira = j==='(no jira)'?null:j;
+    const isM = j==='__meeting__';
+    const jira = isM?'__meeting__':(j==='(no jira)'?null:j);
     totHTML+=`<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="${keyOf(jira)}">
       <span class="w-2.5 h-2.5 rounded-sm" style="background:${colorFor(jira)}"></span>
-      <span class="font-medium">${jira||'no jira'}</span>${nameFor(jira)?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}
+      <span class="font-medium">${isM?'meetings':(jira||'no jira')}</span>${(!isM&&nameFor(jira))?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}
       <span class="mono text-slate-300">${dur(mins)}</span></div>`;
   }
   body.innerHTML = cols + totHTML + `</div>`;
   modal.classList.remove('hidden');
+  body.querySelectorAll('[data-mid]').forEach(el=> el.onclick = ()=> toggleMeeting(MIDX[+el.dataset.mid].id));
   wireHover();
 }
-function closeModal(){ document.getElementById('modal').classList.add('hidden'); }
+function closeModal(){ document.getElementById('modal').classList.add('hidden'); currentDay=null; }
 
 // ---------- tooltip + hover wiring ----------
 const tip = document.getElementById('tip');
 function showTip(seg, x, y){
   const dl = (seg.end-seg.start);
-  const head = seg.jira ? `${seg.jira} · ${nameFor(seg.jira)}` : (nameFor(null)+' · '+laneShort(seg.lane));
-  const init = seg.init;
-  let html = `<div class="font-semibold text-white mb-0.5"></div>
-    <div class="text-slate-400 mono mb-1"></div>
-    <div class="text-slate-300"></div>`;
-  tip.innerHTML = html;
+  let head, line3;
+  if(seg.meeting){
+    head = seg.title;
+    line3 = 'calendar meeting · click in the Meetings column to toggle';
+  } else {
+    head = seg.jira ? `${seg.jira} · ${nameFor(seg.jira)}` : (nameFor(null)+' · '+laneShort(seg.lane));
+    line3 = `${seg.events.length} event${seg.events.length===1?'':'s'} · ${laneShort(seg.lane)}`;
+    const init = seg.init;
+    if(init){ line3 += `\n↪ started with ${typeLabel(init.type)}`; if(init.preview) line3 += `: “${init.preview}”`; else if(init.branch) line3 += ` (${init.branch})`; }
+  }
+  tip.innerHTML = `<div class="font-semibold text-white mb-0.5"></div><div class="text-slate-400 mono mb-1"></div><div class="text-slate-300"></div>`;
   const kids = tip.children;
   kids[0].textContent = head;
   kids[1].textContent = `${fmt(seg.start)}–${fmt(seg.end)} · ${dur(dl)}`;
-  let line3 = `${seg.events.length} event${seg.events.length===1?'':'s'} · ${laneShort(seg.lane)}`;
-  if(init){ line3 += `\n↪ started with ${typeLabel(init.type)}`; if(init.preview) line3 += `: “${init.preview}”`; else if(init.branch) line3 += ` (${init.branch})`; }
   kids[2].style.whiteSpace='pre-line';
   kids[2].textContent = line3;
   tip.style.opacity='1';
@@ -274,6 +348,9 @@ function renderLegend(){
       <span class="w-3 h-3 rounded-sm" style="background:${colorFor(j)}"></span>
       <span class="font-semibold">${j}</span><span class="text-slate-400">${nameFor(j)}</span></span>`).join('');
   h += `<span class="legitem flex items-center gap-1.5" data-jira="__none__"><span class="w-3 h-3 rounded-sm" style="background:${NOJIRA}"></span><span class="text-slate-400">no jira</span></span>`;
+  if((DATA.meetings||[]).length){
+    h += `<span class="legitem flex items-center gap-1.5" data-jira="__meeting__"><span class="w-3 h-3 rounded-sm" style="background:${MEETING};background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.3) 0 3px,transparent 3px 6px)"></span><span class="text-slate-400">meeting</span></span>`;
+  }
   document.getElementById('legend').innerHTML = h;
   wireHover();
 }

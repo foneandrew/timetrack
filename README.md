@@ -63,10 +63,16 @@ signal to your last signal + 30min idle tail, framed 8am–5pm.
 Copy `config.example.json` → `config.json` (gitignored — it holds your secret
 calendar URL). Keys:
 - `app_paths` — repo(s) whose lane is pinned at the top as the "app" lane.
-- `ics_url` — Outlook published-calendar `.ics` link (meetings, not yet wired).
+- `ics_url` — Outlook published-calendar `.ics` link. Meetings render as their
+  own lane and overlay the resolved attention during their slot (the task
+  underneath resumes after). FREE / cancelled / `skip_meetings` matches default
+  to OFF; click a meeting in the drill-in to toggle (persisted in localStorage).
+  Recurring meetings (WEEKLY/DAILY/MONTHLY) are expanded; times in
+  `TZID=New Zealand Standard Time` are treated as local.
 - `skip_meetings` — title substrings that default to OFF.
+- `jira_names` — override the auto-derived JIRA names.
 
 ## Not yet wired (fast-follows)
-- Meeting lane from the ICS feed (incl. RRULE expansion for recurring meetings).
 - Per-JIRA totals in the week view; days-as-rows table shell.
 - Clockify project mapping; Chrome PR-view signal; shell-heartbeat + commit signals.
+- RRULE edge cases beyond WEEKLY/DAILY/MONTHLY; all-day events on the timeline.

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import urllib.request
 from pathlib import Path
 
 HOME = Path.home()
@@ -192,6 +193,231 @@ def collect_checkouts(start_dt, end_dt, app_paths):
     return events, lanes
 
 
+# ------------------------- calendar (ICS) -------------------------
+WD = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+
+
+def fetch_ics(url, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": "timetrack"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def unfold(text):
+    """RFC5545 line unfolding: a leading space/tab continues the previous line."""
+    out = []
+    for line in text.splitlines():
+        if line[:1] in (" ", "\t") and out:
+            out[-1] += line[1:]
+        else:
+            out.append(line)
+    return out
+
+
+def parse_vevents(lines):
+    """Collect VEVENT property dicts, skipping VTIMEZONE (its DST rules are not meetings)."""
+    events, cur, in_tz = [], None, False
+    for ln in lines:
+        if ln == "BEGIN:VTIMEZONE":
+            in_tz = True; continue
+        if ln == "END:VTIMEZONE":
+            in_tz = False; continue
+        if in_tz:
+            continue
+        if ln == "BEGIN:VEVENT":
+            cur = {}; continue
+        if ln == "END:VEVENT":
+            if cur is not None:
+                events.append(cur); cur = None
+            continue
+        if cur is None or ":" not in ln:
+            continue
+        name_params, _, val = ln.partition(":")
+        bits = name_params.split(";")
+        name = bits[0].upper()
+        params = {}
+        for p in bits[1:]:
+            if "=" in p:
+                k, v = p.split("=", 1)
+                params[k.upper()] = v
+        if name in ("DTSTART", "DTEND"):
+            cur[name] = (val, params)
+        elif name == "EXDATE":
+            cur.setdefault("EXDATE", []).append((val, params))
+        else:
+            cur[name] = val
+    return events
+
+
+def ics_unescape(s):
+    out = s.replace("\\\\", "\x00").replace("\\n", " ").replace("\\N", " ").replace("\\,", ",").replace("\\;", ";")
+    return " ".join(out.replace("\x00", "\\").split())
+
+
+def parse_ics_dt(value, params=None):
+    """Return (local-aware datetime, is_all_day). TZID times are treated as local
+    wall-clock (machine is NZ); Z values are converted from UTC."""
+    params = params or {}
+    v = value.strip()
+    if params.get("VALUE") == "DATE" or (len(v) == 8 and "T" not in v):
+        return dt.datetime.strptime(v, "%Y%m%d").astimezone(), True
+    if v.endswith("Z"):
+        return dt.datetime.strptime(v, "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc).astimezone(), False
+    return dt.datetime.strptime(v[:15], "%Y%m%dT%H%M%S").astimezone(), False
+
+
+def nth_weekday(year, month, wd, nth):
+    """nth (1-based, or -1 for last) weekday `wd` in a given month."""
+    if nth > 0:
+        d = dt.date(year, month, 1)
+        d += dt.timedelta(days=(wd - d.weekday()) % 7)
+        d += dt.timedelta(weeks=nth - 1)
+        return d if d.month == month else None
+    # last
+    if month == 12:
+        d = dt.date(year, 12, 31)
+    else:
+        d = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+    d -= dt.timedelta(days=(d.weekday() - wd) % 7)
+    return d
+
+
+def expand_rrule(start_dt, rrule, win_end):
+    """Expand a recurrence to local-aware occurrence datetimes up to win_end (date)."""
+    parts = dict(p.split("=", 1) for p in rrule.split(";") if "=" in p)
+    freq = parts.get("FREQ")
+    interval = int(parts.get("INTERVAL", "1") or 1)
+    count = int(parts["COUNT"]) if "COUNT" in parts else None
+    until = None
+    if "UNTIL" in parts:
+        try:
+            until = parse_ics_dt(parts["UNTIL"])[0].date()
+        except Exception:
+            until = None
+    byday = parts.get("BYDAY")
+    t = start_dt.timetz()
+    stop = min(until, win_end) if until else win_end
+    occ, n, guard = [], 0, 0
+
+    def keep(cand):
+        nonlocal n
+        occ.append(cand)
+        n += 1
+        return not (count and n >= count)
+
+    if freq == "WEEKLY":
+        days = sorted(WD[d[-2:]] for d in byday.split(",")) if byday else [start_dt.weekday()]
+        week = start_dt.date() - dt.timedelta(days=start_dt.weekday())
+        while week <= stop and guard < 1500:
+            guard += 1
+            for wd in days:
+                d = week + dt.timedelta(days=wd)
+                if d < start_dt.date() or d > stop:
+                    continue
+                if not keep(dt.datetime.combine(d, t)):
+                    return occ
+            week += dt.timedelta(weeks=interval)
+    elif freq == "DAILY":
+        d = start_dt
+        while d.date() <= stop and guard < 3000:
+            guard += 1
+            if not keep(d):
+                return occ
+            d += dt.timedelta(days=interval)
+    elif freq == "MONTHLY":
+        bymd = parts.get("BYMONTHDAY")
+        y, mo = start_dt.year, start_dt.month
+        while guard < 400:
+            guard += 1
+            cand_date = None
+            if bymd:
+                try:
+                    cand_date = dt.date(y, mo, int(bymd.split(",")[0]))
+                except ValueError:
+                    cand_date = None
+            elif byday:
+                m = re.match(r"(-?\d+)([A-Z]{2})", byday.split(",")[0])
+                if m:
+                    cand_date = nth_weekday(y, mo, WD[m.group(2)], int(m.group(1)))
+            else:
+                try:
+                    cand_date = dt.date(y, mo, start_dt.day)
+                except ValueError:
+                    cand_date = None
+            if cand_date and cand_date >= start_dt.date():
+                if cand_date > stop:
+                    break
+                if not keep(dt.datetime.combine(cand_date, t)):
+                    return occ
+            mo += interval
+            while mo > 12:
+                mo -= 12; y += 1
+    else:
+        occ = [start_dt]  # unknown/unsupported freq → just the base occurrence
+    return occ
+
+
+def expand_meeting(ev, win_start, win_end):
+    if "DTSTART" not in ev:
+        return []
+    start_dt, all_day = parse_ics_dt(*ev["DTSTART"])
+    if all_day:
+        return []  # all-day events don't paint the working-hours timeline
+    if "DTEND" in ev:
+        dur = parse_ics_dt(*ev["DTEND"])[0] - start_dt
+    else:
+        dur = dt.timedelta(minutes=30)
+    title = ics_unescape(ev.get("SUMMARY") or "(no title)")
+    status = ev.get("STATUS", "")
+    busy = ev.get("X-MICROSOFT-CDO-BUSYSTATUS", "")
+    exset = set()
+    for val, params in ev.get("EXDATE", []):
+        for piece in val.split(","):
+            try:
+                exset.add(parse_ics_dt(piece, params)[0].date())
+            except Exception:
+                pass
+    starts = expand_rrule(start_dt, ev["RRULE"], win_end) if ev.get("RRULE") else [start_dt]
+    out = []
+    for s in starts:
+        if s.date() in exset or not (win_start <= s.date() <= win_end) or s.weekday() >= 5:
+            continue
+        e = s + dur
+        out.append({
+            "date": s.date().isoformat(),
+            "startMin": s.hour * 60 + s.minute,
+            "endMin": (e.hour * 60 + e.minute) if e.date() == s.date() else 24 * 60,
+            "title": title, "busy": busy, "status": status,
+        })
+    return out
+
+
+def collect_meetings(cfg, start_date, today):
+    url = cfg.get("ics_url")
+    if not url:
+        return []
+    try:
+        events = parse_vevents(unfold(fetch_ics(url)))
+    except Exception as e:
+        print(f"warning: calendar fetch/parse failed: {e}", file=sys.stderr)
+        return []
+    skip = [s.lower() for s in cfg.get("skip_meetings", [])]
+    meetings, seen = [], set()
+    for ev in events:
+        for m in expand_meeting(ev, start_date, today):
+            m["id"] = f'{m["date"]}|{m["startMin"]}|{m["title"]}'
+            if m["id"] in seen:
+                continue
+            seen.add(m["id"])
+            tl = m["title"].lower()
+            m["defaultOn"] = (m["busy"] != "FREE" and m["status"] != "CANCELLED"
+                              and not tl.startswith("canceled:") and not tl.startswith("cancelled:")
+                              and not any(s in tl for s in skip))
+            meetings.append(m)
+    meetings.sort(key=lambda m: (m["date"], m["startMin"]))
+    return meetings
+
+
 def build_weeks(start_date, today):
     """Mon–Fri columns per ISO week across the window."""
     weeks = []
@@ -248,7 +474,7 @@ def main():
         "lanes": lanes,
         "events": events,
         "jiraNames": build_jira_names(events, cfg.get("jira_names")),
-        "meetings": [],  # wired in a later increment (ICS + RRULE)
+        "meetings": collect_meetings(cfg, start_date, today),
         "weeks": build_weeks(start_date, today),
         "config": {"appPaths": app_paths, "skipMeetings": cfg["skip_meetings"]},
     }
