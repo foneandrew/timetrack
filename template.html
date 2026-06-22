@@ -11,83 +11,93 @@
   :root { color-scheme: dark; }
   body { font-family: 'Inter', system-ui, sans-serif; }
   .mono { font-family: 'JetBrains Mono', monospace; }
-  .seg { transition: filter .12s ease, outline .12s ease; }
-  .seg:hover { filter: brightness(1.18); outline: 2px solid rgba(255,255,255,.5); outline-offset:-1px; z-index:5; }
-  .daycol:hover { background: rgba(255,255,255,.03); }
-  ::-webkit-scrollbar { height:8px; width:8px; }
-  ::-webkit-scrollbar-thumb { background:#3a3f4b; border-radius:4px; }
-  .gridline { position:absolute; left:0; right:0; border-top:1px dashed rgba(255,255,255,.07); }
+  .seg { transition: opacity .12s ease, filter .12s ease, outline .12s ease; cursor: default; }
+  .seg:hover { filter: brightness(1.15); outline: 2px solid rgba(255,255,255,.7); outline-offset:-1px; z-index:6; }
+  .daycol { transition: background .12s ease; }
+  .daycol:hover { background: rgba(255,255,255,.05); }
+  .gridline { position:absolute; left:0; right:0; border-top:1px dashed rgba(255,255,255,.10); pointer-events:none; }
+  .dim { opacity:.18 !important; }
+  .legitem { transition: opacity .12s ease; cursor: default; }
+  .legitem.hi { text-shadow:0 0 10px currentColor; }
   .tab { transition: all .12s ease; }
+  .notch { position:absolute; pointer-events:none; }
+  #tip { position:fixed; z-index:50; pointer-events:none; max-width:300px; opacity:0; transition:opacity .08s ease; }
 </style>
 </head>
-<body class="bg-[#0d0f14] text-slate-200 min-h-screen">
-<div class="max-w-[1200px] mx-auto px-6 py-7">
+<body class="bg-[#1b1f2a] text-slate-100 min-h-screen">
+<div class="max-w-[1240px] mx-auto px-6 py-7">
 
   <header class="flex items-baseline justify-between flex-wrap gap-3 mb-6">
     <div>
       <h1 class="text-2xl font-bold text-white tracking-tight">timetrack</h1>
-      <p id="sub" class="text-sm text-slate-500 mt-0.5"></p>
+      <p id="sub" class="text-sm text-slate-400 mt-0.5"></p>
     </div>
     <div id="weektabs" class="flex gap-1.5 flex-wrap"></div>
   </header>
 
   <div id="week" class="mb-6"></div>
-  <div id="legend" class="flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-400"></div>
+  <div id="legend" class="flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-300"></div>
 </div>
 
-<!-- drill-down modal -->
 <div id="modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-20 flex items-start justify-center overflow-auto py-8 px-4">
-  <div class="bg-[#13161d] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[1100px] p-6">
+  <div class="bg-[#232834] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[1120px] p-6">
     <div class="flex items-center justify-between mb-5">
       <h2 id="modalTitle" class="text-lg font-semibold text-white"></h2>
-      <button onclick="closeModal()" class="text-slate-400 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/5">esc ✕</button>
+      <button onclick="closeModal()" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/10">esc ✕</button>
     </div>
     <div id="modalBody" class="overflow-x-auto"></div>
   </div>
 </div>
 
+<div id="tip" class="bg-[#0c0e14] border border-white/15 rounded-lg shadow-xl px-3 py-2 text-xs"></div>
+
 <script>
 /*__TIMETRACK_DATA__*/
-const DATA = window.__TIMETRACK__ || {events:[],lanes:{},weeks:[],frame:{startMin:480,endMin:1020,idleTailMin:30}};
+const DATA = window.__TIMETRACK__ || {events:[],lanes:{},weeks:[],jiraNames:{},frame:{startMin:480,endMin:1020,idleTailMin:30}};
 const FRAME = DATA.frame;
+const NAMES = DATA.jiraNames || {};
 
 // ---------- colour ----------
-const PALETTE = ['#5b8def','#36c5a8','#e0a13c','#d3608a','#8a7ef0','#4bb3d9','#cf6b4b','#7bb84e','#c75fb8','#5fa3a3','#b98be0','#d99a4e'];
-const jiraColors = {};
-let colorIdx = 0;
+const PALETTE = ['#6ea0ff','#3fd6b6','#f0b04c','#ec7aa0','#9f93ff','#56c6ec','#e07d5c','#8fcc5e','#dd72c8','#6fbcbc','#c79bf0','#eab057'];
+const NOJIRA = '#5b6478';
+const jiraColors = {}; let colorIdx = 0;
 function colorFor(jira){
-  if(!jira) return '#3b4150';            // no-jira = grey
+  if(!jira) return NOJIRA;
   if(!(jira in jiraColors)) jiraColors[jira] = PALETTE[colorIdx++ % PALETTE.length];
   return jiraColors[jira];
 }
+function nameFor(jira){ return jira ? (NAMES[jira] || '') : 'no jira'; }
+function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
+function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
 function fmt(min){ const h=Math.floor(min/60), m=Math.round(min%60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
 function dur(min){ const h=Math.floor(min/60), m=Math.round(min%60); return (h?h+'h ':'')+(m?m+'m':(h?'':'0m')); }
+function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':t)); }
 
 // ---------- per-day model (latest-wins attention) ----------
 function dayEvents(date){ return DATA.events.filter(e=>e.date===date).sort((a,b)=>a.minute-b.minute); }
-
 function dayModel(date){
   const evs = dayEvents(date);
   if(!evs.length) return null;
   const idle = FRAME.idleTailMin;
   const activeStart = evs[0].minute;
   const activeEnd = evs[evs.length-1].minute + idle;
-  let segs=[];
+  let raw=[];
   for(let i=0;i<evs.length;i++){
-    const start = evs[i].minute;
-    const end = (i<evs.length-1) ? evs[i+1].minute : activeEnd;
+    const start=evs[i].minute, end=(i<evs.length-1)?evs[i+1].minute:activeEnd;
     if(end<=start) continue;
-    segs.push({start,end,lane:evs[i].lane,jira:evs[i].jira,branch:evs[i].branch});
+    raw.push({start,end,lane:evs[i].lane,jira:evs[i].jira,branch:evs[i].branch});
   }
-  // merge adjacent identical lane+jira
   const merged=[];
-  for(const s of segs){
+  for(const s of raw){
     const last=merged[merged.length-1];
-    if(last && last.lane===s.lane && last.jira===s.jira){ last.end=s.end; }
+    if(last && last.lane===s.lane && last.jira===s.jira) last.end=s.end;
     else merged.push({...s});
   }
-  // total per jira
+  for(const s of merged){
+    s.events = evs.filter(e=>e.lane===s.lane && e.minute>=s.start && e.minute<s.end);
+    s.init = s.events[0] || null;
+  }
   const totals={};
   for(const s of merged){ const k=s.jira||'(no jira)'; totals[k]=(totals[k]||0)+(s.end-s.start); }
   return {date,activeStart,activeEnd,segs:merged,evs,totals,
@@ -95,49 +105,55 @@ function dayModel(date){
           frameEnd:Math.max(FRAME.endMin,activeEnd)};
 }
 
-// ---------- rendering helpers ----------
-const BAR_H = 360;
+// ---------- bar rendering ----------
+const BAR_H = 380;
 function yFor(min,m){ return (min-m.frameStart)/(m.frameEnd-m.frameStart)*BAR_H; }
 
-function barHTML(m, segs, widthStyle){
-  let h = `<div class="relative rounded-lg bg-[#0a0c11] border border-white/5 overflow-hidden" style="height:${BAR_H}px;${widthStyle||'width:100%'}">`;
-  for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){
-    h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`;
-  }
+// registry for instant tooltips
+let TIP = [];
+function barHTML(m, segs, widthStyle, opts={}){
+  const detail = !!opts.detail;
+  let h = `<div class="relative rounded-lg bg-[#12151d] border border-white/10 overflow-hidden" style="height:${BAR_H}px;${widthStyle||'width:100%'}">`;
+  for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`; }
   for(const s of segs){
     const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
     const label=s.jira||laneShort(s.lane);
-    h+=`<div class="seg absolute rounded-[3px]" title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}\n${laneShort(s.lane)}${s.branch?(' ('+s.branch+')'):''}"
+    let attrs = `data-jira="${keyOf(s.jira)}"`;
+    if(detail){ const idx=TIP.push(s)-1; attrs += ` data-tip="${idx}"`; }
+    else { attrs += ` title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}"`; }
+    h+=`<div class="seg absolute rounded-[3px]" ${attrs}
          style="top:${top}px;height:${height}px;left:3px;right:3px;background:${colorFor(s.jira)}">
-         ${height>16?`<span class="text-[9px] font-semibold text-black/70 pl-1 leading-tight block truncate">${label}</span>`:''}</div>`;
+         ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${textOn(s.jira)}">${label}</span>`:''}</div>`;
+  }
+  if(detail && opts.events){
+    for(const e of opts.events){
+      const y=yFor(e.minute,m);
+      const isPrompt = e.type==='prompt';
+      h+=`<div class="notch" style="top:${y-3}px;left:-9px;width:7px;height:7px;${isPrompt?'border-radius:50%':'transform:rotate(45deg)'};background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.6)" title="${fmt(e.minute)} ${typeLabel(e.type)}"></div>`;
+    }
   }
   return h+`</div>`;
 }
 
-function hourAxis(m){
-  let h=`<div class="relative mono text-[10px] text-slate-600" style="height:${BAR_H}px;width:34px">`;
+function hourAxis(m, leftPad=false){
+  let h=`<div class="relative mono text-[10px] text-slate-500" style="height:${BAR_H}px;width:${leftPad?42:34}px">`;
   for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){
-    const y=yFor(hr*60,m);
-    h+=`<div class="absolute right-1" style="top:${y-6}px">${String(hr).padStart(2,'0')}:00</div>`;
+    h+=`<div class="absolute right-1" style="top:${yFor(hr*60,m)-6}px">${String(hr).padStart(2,'0')}:00</div>`;
   }
-  h+=`</div>`; return h;
+  return h+`</div>`;
 }
 
-// ---------- week view (day columns) ----------
+// ---------- week view ----------
 let currentWeek = (DATA.weeks.find(w=>w.isCurrent) || DATA.weeks[DATA.weeks.length-1] || {}).iso;
-
 function renderTabs(){
   document.getElementById('weektabs').innerHTML = DATA.weeks.map(w=>`
     <button onclick="selectWeek('${w.iso}')" class="tab px-3 py-1.5 rounded-lg text-xs font-medium border
-      ${w.iso===currentWeek?'bg-blue-500/90 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-400 hover:bg-white/10'}">
-      ${w.label}${w.isCurrent?' <span class="opacity-60">· now</span>':''}
-    </button>`).join('');
+      ${w.iso===currentWeek?'bg-blue-500 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'}">
+      ${w.label}${w.isCurrent?' <span class="opacity-70">· now</span>':''}</button>`).join('');
 }
-
 function renderWeek(){
   const w = DATA.weeks.find(x=>x.iso===currentWeek);
-  if(!w){ document.getElementById('week').innerHTML='<p class="text-slate-500">No data.</p>'; return; }
-  // shared frame across the week for aligned axes
+  if(!w){ document.getElementById('week').innerHTML='<p class="text-slate-400">No data.</p>'; return; }
   const models = w.days.map(d=>({d, m:dayModel(d.date)}));
   const active = models.filter(x=>x.m);
   const fStart = active.length?Math.min(...active.map(x=>x.m.frameStart)):FRAME.startMin;
@@ -146,80 +162,124 @@ function renderWeek(){
 
   let html = `<div class="flex gap-3 items-start">${hourAxis(shared)}<div class="flex gap-3 flex-1">`;
   for(const {d,m} of models){
-    const dayActive = m ? m.activeEnd-m.activeStart : 0;
-    html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/40':''}"
-                 onclick="openDay('${d.date}')">
+    html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''}" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
-        <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-300'}">${d.weekday.slice(0,3)}</div>
-        <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div>
-      </div>`;
+        <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
+        <div class="text-[10px] text-slate-500 mono">${d.short.replace(/^\w+\s/,'')}</div></div>`;
     if(m){
-      const segs = m.segs.map(s=>({...s, start:s.start, end:s.end}));
-      html += `<div class="flex justify-center">${barHTML({...m,frameStart:fStart,frameEnd:fEnd}, segs, 'width:100%')}</div>`;
-      html += `<div class="text-center text-[10px] text-slate-400 mono mt-1.5">${dur(dayActive)}</div>`;
+      html += `<div class="flex justify-center">${barHTML({...m,frameStart:fStart,frameEnd:fEnd}, m.segs, 'width:100%')}</div>`;
+      html += `<div class="text-center text-[10px] text-slate-300 mono mt-1.5">${dur(m.activeEnd-m.activeStart)}</div>`;
     } else {
-      html += `<div class="rounded-lg bg-[#0a0c11] border border-dashed border-white/5 flex items-center justify-center text-slate-700 text-[10px]" style="height:${BAR_H}px">—</div>
-               <div class="text-center text-[10px] text-slate-700 mono mt-1.5">·</div>`;
+      html += `<div class="rounded-lg bg-[#12151d] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
+               <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
     }
     html += `</div>`;
   }
-  html += `</div></div>`;
-  document.getElementById('week').innerHTML = html;
+  document.getElementById('week').innerHTML = html + `</div></div>`;
+  wireHover();
 }
 
 // ---------- drill-down ----------
 function openDay(date){
   const m = dayModel(date);
-  const w = document.getElementById('modal');
-  const body = document.getElementById('modalBody');
+  const modal = document.getElementById('modal'), body = document.getElementById('modalBody');
   document.getElementById('modalTitle').textContent =
     new Date(date+'T00:00').toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'});
-  if(!m){ body.innerHTML='<p class="text-slate-500 py-8 text-center">No activity recorded this day.</p>'; w.classList.remove('hidden'); return; }
+  if(!m){ body.innerHTML='<p class="text-slate-400 py-8 text-center">No activity recorded this day.</p>'; modal.classList.remove('hidden'); return; }
+  TIP = [];
+  const laneIds=[...new Set(m.segs.map(s=>s.lane))].sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0));
 
-  // lanes active that day, app lane first
-  const laneIds=[...new Set(m.segs.map(s=>s.lane))]
-    .sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0));
-
-  let cols = `<div class="flex gap-3 items-start">${hourAxis(m)}`;
-  // resolved column
-  cols += `<div><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
-           ${barHTML(m,m.segs,'width:90px')}</div>`;
-  // per-lane columns
+  let cols = `<div class="flex gap-4 items-start">${hourAxis(m,true)}`;
+  cols += `<div class="pl-1"><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
+           ${barHTML(m,m.segs,'width:96px',{detail:true,events:m.evs})}</div>`;
   for(const id of laneIds){
     const segs=m.segs.filter(s=>s.lane===id);
+    const laneEvs=m.evs.filter(e=>e.lane===id);
     const app=DATA.lanes[id]?.isApp;
-    cols += `<div><div class="text-center text-[10px] font-medium mb-1.5 truncate ${app?'text-amber-300':'text-slate-400'}" style="max-width:90px" title="${laneShort(id)}">
-             ${app?'★ ':''}${laneShort(id)}</div>${barHTML(m,segs,'width:90px')}</div>`;
+    cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5 truncate ${app?'text-amber-300':'text-slate-300'}" style="max-width:96px" title="${laneShort(id)}">
+             ${app?'★ ':''}${laneShort(id)}</div>${barHTML(m,segs,'width:96px',{detail:true,events:laneEvs})}</div>`;
   }
   cols += `</div>`;
 
-  // totals
   const tot=Object.entries(m.totals).sort((a,b)=>b[1]-a[1]);
-  let totHTML=`<div class="mt-5 pt-4 border-t border-white/10"><div class="text-xs text-slate-500 mb-2">Rough breakdown · active ${dur(m.activeEnd-m.activeStart)} (${fmt(m.activeStart)}–${fmt(m.activeEnd)})</div>
+  let totHTML=`<div class="mt-5 pt-4 border-t border-white/10">
+    <div class="text-xs text-slate-400 mb-2">Rough breakdown · active ${dur(m.activeEnd-m.activeStart)} (${fmt(m.activeStart)}–${fmt(m.activeEnd)}) · ● prompt ◆ checkout</div>
     <div class="flex flex-wrap gap-2">`;
   for(const [j,mins] of tot){
-    totHTML+=`<div class="flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs">
-      <span class="w-2.5 h-2.5 rounded-sm" style="background:${colorFor(j==='(no jira)'?null:j)}"></span>
-      <span class="font-medium">${j}</span><span class="mono text-slate-400">${dur(mins)}</span></div>`;
+    const jira = j==='(no jira)'?null:j;
+    totHTML+=`<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="${keyOf(jira)}">
+      <span class="w-2.5 h-2.5 rounded-sm" style="background:${colorFor(jira)}"></span>
+      <span class="font-medium">${jira||'no jira'}</span>${nameFor(jira)?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}
+      <span class="mono text-slate-300">${dur(mins)}</span></div>`;
   }
-  totHTML+=`</div></div>`;
-
-  body.innerHTML = cols + totHTML;
-  w.classList.remove('hidden');
+  body.innerHTML = cols + totHTML + `</div>`;
+  modal.classList.remove('hidden');
+  wireHover();
 }
 function closeModal(){ document.getElementById('modal').classList.add('hidden'); }
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
-document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
 
-function selectWeek(iso){ currentWeek=iso; renderTabs(); renderWeek(); renderLegend(); }
+// ---------- tooltip + hover wiring ----------
+const tip = document.getElementById('tip');
+function showTip(seg, x, y){
+  const dl = (seg.end-seg.start);
+  const head = seg.jira ? `${seg.jira} · ${nameFor(seg.jira)}` : (nameFor(null)+' · '+laneShort(seg.lane));
+  const init = seg.init;
+  let html = `<div class="font-semibold text-white mb-0.5"></div>
+    <div class="text-slate-400 mono mb-1"></div>
+    <div class="text-slate-300"></div>`;
+  tip.innerHTML = html;
+  const kids = tip.children;
+  kids[0].textContent = head;
+  kids[1].textContent = `${fmt(seg.start)}–${fmt(seg.end)} · ${dur(dl)}`;
+  let line3 = `${seg.events.length} event${seg.events.length===1?'':'s'} · ${laneShort(seg.lane)}`;
+  if(init){ line3 += `\n↪ started with ${typeLabel(init.type)}`; if(init.preview) line3 += `: “${init.preview}”`; else if(init.branch) line3 += ` (${init.branch})`; }
+  kids[2].style.whiteSpace='pre-line';
+  kids[2].textContent = line3;
+  tip.style.opacity='1';
+  moveTip(x,y);
+}
+function moveTip(x,y){
+  const r=tip.getBoundingClientRect();
+  let nx=x+14, ny=y+14;
+  if(nx+r.width>innerWidth-8) nx=x-r.width-14;
+  if(ny+r.height>innerHeight-8) ny=y-r.height-14;
+  tip.style.left=nx+'px'; tip.style.top=ny+'px';
+}
+function hideTip(){ tip.style.opacity='0'; }
 
-function renderLegend(){
-  const jiras=[...new Set(DATA.events.map(e=>e.jira).filter(Boolean))].sort();
-  let h = jiras.map(j=>`<span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm" style="background:${colorFor(j)}"></span>${j}</span>`).join('');
-  h += `<span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm" style="background:#3b4150"></span>no jira</span>`;
-  document.getElementById('legend').innerHTML = h;
+function wireHover(){
+  document.querySelectorAll('[data-jira]').forEach(el=>{
+    el.addEventListener('mouseenter', ()=> setHiKey(el.dataset.jira));
+    el.addEventListener('mouseleave', ()=> setHiKey(null));
+  });
+  document.querySelectorAll('.seg[data-tip]').forEach(el=>{
+    const seg = TIP[+el.dataset.tip];
+    el.addEventListener('mouseenter', e=> showTip(seg, e.clientX, e.clientY));
+    el.addEventListener('mousemove', e=> moveTip(e.clientX, e.clientY));
+    el.addEventListener('mouseleave', hideTip);
+  });
+}
+function setHiKey(key){
+  document.querySelectorAll('[data-jira]').forEach(el=>{
+    const match = key && el.dataset.jira===key;
+    el.classList.toggle('dim', !!key && !match);
+    el.classList.toggle('hi', !!match);
+  });
 }
 
+function selectWeek(iso){ currentWeek=iso; renderTabs(); renderWeek(); renderLegend(); }
+function renderLegend(){
+  const jiras=[...new Set(DATA.events.map(e=>e.jira).filter(Boolean))].sort();
+  let h = jiras.map(j=>`<span class="legitem flex items-center gap-1.5" data-jira="${keyOf(j)}" style="color:${colorFor(j)}">
+      <span class="w-3 h-3 rounded-sm" style="background:${colorFor(j)}"></span>
+      <span class="font-semibold">${j}</span><span class="text-slate-400">${nameFor(j)}</span></span>`).join('');
+  h += `<span class="legitem flex items-center gap-1.5" data-jira="__none__"><span class="w-3 h-3 rounded-sm" style="background:${NOJIRA}"></span><span class="text-slate-400">no jira</span></span>`;
+  document.getElementById('legend').innerHTML = h;
+  wireHover();
+}
+
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
 document.getElementById('sub').textContent =
   `${DATA.window?.weeks||'?'} weeks · ${DATA.events.length} signals · ${Object.keys(DATA.lanes).length} worktrees · ${DATA.tz||''} · built ${new Date(DATA.generatedAt).toLocaleString()}`;
 renderTabs(); renderWeek(); renderLegend();

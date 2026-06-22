@@ -34,6 +34,7 @@ DEFAULTS = {
     "app_paths": [str(HOME / "dev" / "cmr-web")],
     "ics_url": None,        # Outlook published calendar .ics (secret — keep out of git)
     "skip_meetings": [],    # meeting title substrings that default to OFF
+    "jira_names": {},       # override derived names, e.g. {"PBL-7198": "EFS comparison"}
 }
 
 
@@ -67,6 +68,29 @@ def jira_from(branch):
         return None
     m = JIRA_RE.search(branch)
     return m.group(1).upper() if m else None
+
+
+def name_from_branch(branch, jira):
+    """Derive a human name for a JIRA from its branch slug.
+    'pbl-7198/efs-comparison' + PBL-7198 -> 'efs comparison'."""
+    if not branch or not jira:
+        return None
+    s = re.sub(r"^" + re.escape(jira), "", branch, flags=re.I)  # drop the tag
+    s = re.sub(r"[\s/_-]+", " ", s).strip()
+    return s or None
+
+
+def build_jira_names(events, overrides):
+    from collections import Counter, defaultdict
+    cand = defaultdict(Counter)
+    for e in events:
+        if e.get("jira") and e.get("branch"):
+            n = name_from_branch(e["branch"], e["jira"])
+            if n:
+                cand[e["jira"]][n] += 1
+    names = {j: c.most_common(1)[0][0] for j, c in cand.items()}
+    names.update(overrides or {})  # config wins
+    return names
 
 
 def window_bounds(weeks):
@@ -119,6 +143,9 @@ def collect_prompts(start_dt, end_dt, app_paths):
                 cwd = d.get("cwd")
                 if not cwd:
                     continue
+                msg = d.get("message") or {}
+                c = msg.get("content") if isinstance(msg, dict) else None
+                preview = " ".join(c.split())[:90] if isinstance(c, str) else None
                 lm = lane_meta(cwd, app_paths)
                 lanes[lm["id"]] = lm
                 events.append({
@@ -129,6 +156,7 @@ def collect_prompts(start_dt, end_dt, app_paths):
                     "jira": jira_from(d.get("gitBranch")),
                     "branch": d.get("gitBranch"),
                     "type": "prompt",
+                    "preview": preview,
                 })
     return events, lanes
 
@@ -219,6 +247,7 @@ def main():
         "frame": {"startMin": 8 * 60, "endMin": 17 * 60, "idleTailMin": 30},
         "lanes": lanes,
         "events": events,
+        "jiraNames": build_jira_names(events, cfg.get("jira_names")),
         "meetings": [],  # wired in a later increment (ICS + RRULE)
         "weeks": build_weeks(start_date, today),
         "config": {"appPaths": app_paths, "skipMeetings": cfg["skip_meetings"]},
