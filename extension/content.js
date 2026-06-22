@@ -1,27 +1,32 @@
-// Runs on github.com. Emits a heartbeat tick every ~75s while a PR page is
-// the genuine foreground tab (lenient presence: visible + focused). The
-// builder stitches ticks into review intervals — so a lost tick costs ~75s,
-// not a whole session, and crashes/quits don't drop an open block.
+// Runs on github.com. Emits a heartbeat tick while you're genuinely engaged
+// with a PR page. The builder stitches ticks into review intervals, so a lost
+// tick costs ~75s, not a whole session.
 //
-// GitHub is an SPA (Turbo nav between PRs with no reload), so everything is
-// re-evaluated against live location each tick rather than scraped once.
+// Presence is interaction-driven, not focus-gated, because you can scroll a
+// window on a second monitor without it being the focused OS window (the DOM
+// `scroll` event still fires). So:
+//   - interactions (scroll / click / keydown / wheel) tick even when the
+//     browser isn't focused, as long as the tab is visible (on screen);
+//   - a 75s heartbeat ticks while the tab IS focused, to cover motionless
+//     reading;
+//   - everything is debounced to at most one tick per 30s.
+// An ignored/parked tab gets no interactions, so it doesn't count.
+//
+// GitHub is an SPA, so location/JIRA are re-read live on every tick.
 
-const TICK_MS = 75000;
-const MIN_GAP_MS = 30000;
+const HEARTBEAT_MS = 75000;
+const DEBOUNCE_MS = 30000;
 let lastSent = 0;
 
 function isPR() {
   return /^\/[^/]+\/[^/]+\/pull\/\d+/.test(location.pathname);
 }
 
-function foreground() {
-  return document.visibilityState === "visible" && document.hasFocus();
+function visible() {
+  return document.visibilityState === "visible";
 }
 
 function inferJira() {
-  // PR title leads (curated, e.g. "PBL-7317 ..."); branch names back it up.
-  // A PR has two BranchName elements (base + head) — base is usually `main`
-  // with no JIRA, so the first regex match across them is the head's ticket.
   const title = document.querySelector(".js-issue-title")?.textContent || document.title || "";
   const branches = [...document.querySelectorAll('[data-component="BranchName"]')]
     .map(e => e.textContent || "").join(" ");
@@ -29,13 +34,11 @@ function inferJira() {
   return m ? m[1].toUpperCase() : "";
 }
 
-function tick() {
-  if (!isPR() || !foreground()) return;
+function maybeTick() {
+  if (!isPR() || !visible()) return;
   const now = Date.now();
-  if (now - lastSent < MIN_GAP_MS) return;
+  if (now - lastSent < DEBOUNCE_MS) return;
   lastSent = now;
-  // url + title are logged raw every tick so the builder can re-infer the
-  // JIRA later even when the branch/title scrape misses.
   try {
     chrome.runtime.sendMessage({
       type: "review-tick",
@@ -44,10 +47,16 @@ function tick() {
       url: location.href,
       title: document.title
     });
-  } catch (e) { /* SW asleep / context invalidated — next tick retries */ }
+  } catch (e) { /* SW asleep / context invalidated — next interaction retries */ }
 }
 
-setInterval(tick, TICK_MS);
-document.addEventListener("visibilitychange", tick);
-window.addEventListener("focus", tick);
-tick();
+// intentful interactions — fire even when the window isn't focused
+["scroll", "click", "keydown", "wheel"].forEach(ev =>
+  window.addEventListener(ev, maybeTick, { passive: true, capture: true }));
+document.addEventListener("visibilitychange", maybeTick);
+window.addEventListener("focus", maybeTick);
+
+// heartbeat only while clearly active, for reading without interacting
+setInterval(() => { if (document.hasFocus()) maybeTick(); }, HEARTBEAT_MS);
+
+maybeTick();

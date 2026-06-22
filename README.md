@@ -74,11 +74,14 @@ calendar URL). Keys:
 
 ## GitHub review (browser extension)
 
-`extension/` is an MV3 browser extension that logs **active** PR-review time —
-it emits a heartbeat tick every ~75s only while a GitHub PR page is the genuine
-foreground tab (visible + focused), so a parked tab doesn't count. Ticks land in
-`~/.timetrack/review.log` and the builder stitches them into review intervals on
-a synthetic `GitHub review` lane.
+`extension/` is an MV3 browser extension that logs **active** PR-review time.
+Presence is interaction-driven: scroll/click/keydown/wheel on a visible PR page
+emit a tick even when the browser isn't the focused window (so reading a PR on a
+second monitor while you work elsewhere still counts), plus a 75s heartbeat while
+the tab is focused for motionless reading. Everything is debounced to one tick
+per 30s, and the builder's dwell filter needs 2 ticks, so a parked tab or a
+scroll-by doesn't count. Ticks land in `~/.timetrack/review.log` and the builder
+stitches them into review intervals on a synthetic `GitHub review` lane.
 
 Review time attaches to the PR's JIRA (inferred from branch/title, re-inferred in
 the builder from the logged title/url if the scrape missed). If that JIRA has no
