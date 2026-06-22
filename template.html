@@ -279,7 +279,10 @@ function renderWeek(){
   const fEnd   = act.length?Math.max(...act.map(c=>c.fr.frameEnd)):FRAME.endMin;
   const shared = {frameStart:fStart, frameEnd:fEnd};
 
-  let html = `<div class="flex gap-3 items-start">${hourAxis(shared)}<div class="flex gap-3 flex-1">`;
+  // axis gets an invisible header matching the day-column header so the hour
+  // lines align with the bars, not the column tops
+  const axisHead = `<div><div class="text-center mb-2 invisible" aria-hidden="true"><div class="text-xs font-semibold">M</div><div class="text-[10px] mono">x</div><div class="text-[10px] mt-0.5">x</div></div>${hourAxis(shared)}</div>`;
+  let html = `<div class="flex gap-3 items-start">${axisHead}<div class="flex gap-3 flex-1">`;
   for(const c of cells){
     const d=c.d;
     const sum = c.has ? daySummary(d.date, c.segs) : null;
@@ -340,7 +343,8 @@ function openDay(date){
   const mf = frameFor(date, m);
   const rsegs = overlay(m?m.segs:[], date);
 
-  let cols = `<div class="flex gap-4 items-start">${hourAxis(mf,true)}`;
+  const axisHead = `<div><div class="text-center text-[11px] font-semibold mb-1.5 invisible" aria-hidden="true">x</div>${hourAxis(mf,true)}</div>`;
+  let cols = `<div class="flex gap-4 items-start">${axisHead}`;
   cols += `<div class="pl-1"><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
            ${barHTML(mf,rsegs,'width:96px',{detail:true,events:m?m.evs:[]})}</div>`;
   if(mtgs.length){
