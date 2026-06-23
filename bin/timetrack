@@ -25,6 +25,7 @@ HOME = Path.home()
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 GCOD_LOG = HOME / ".timetrack" / "checkouts.log"  # written by the gco/gcod wrapper
 REVIEW_LOG = HOME / ".timetrack" / "review.log"   # written by the browser extension host
+FOCUS_LOG = HOME / ".timetrack" / "focus.log"     # written by the iTerm2 focus daemon
 REVIEW_LANE = "__github_review__"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 TEMPLATE = Path(__file__).resolve().parent.parent / "template.html"
@@ -105,8 +106,38 @@ def window_bounds(weeks):
     return start_dt, now, start_date, today
 
 
+_WT_ROOT_CACHE = {}
+
+
+def worktree_root(cwd):
+    """Normalise a cwd to its git worktree root, so a session run from a deep
+    subdirectory (e.g. .../AdjustmentsDialog/components) folds into the worktree's
+    lane instead of spawning its own. Walks up to the nearest ancestor holding a
+    .git entry — worktrees carry a .git *file*, the main repo a .git *dir*. A
+    worktree since deleted off disk falls back to the cwd unchanged."""
+    if cwd in _WT_ROOT_CACHE:
+        return _WT_ROOT_CACHE[cwd]
+    home = HOME.resolve()
+    cur = Path(cwd)
+    found = None
+    while True:
+        try:
+            if (cur / ".git").exists():
+                found = str(cur)
+                break
+        except OSError:
+            break
+        if cur == cur.parent or cur == home:
+            break
+        cur = cur.parent
+    root = found or cwd
+    _WT_ROOT_CACHE[cwd] = root
+    return root
+
+
 def lane_meta(cwd, app_paths):
     """Build a stable lane descriptor for a working directory."""
+    cwd = worktree_root(cwd)
     p = cwd.rstrip("/")
     is_app = any(p == a.rstrip("/") for a in app_paths)
     parts = p.split("/")
@@ -480,6 +511,93 @@ def collect_reviews(start_dt, end_dt):
     return events, lane
 
 
+# A focus dwell is a run of consecutive same-lane ticks with NO signal from a
+# different lane interrupting it — a prompt/checkout/review on another lane is
+# proof you'd moved on, so it breaks the run (the run resumes on the next tick).
+# There is no max time gap: if nothing else fired, two same-lane ticks bridge
+# however far apart they are — "no competing signal, so you were on that ticket"
+# is the best available guess. A run is kept only if it spans >= MIN_DWELL_SEC, so
+# a single fly-by glance (one tick, zero span) never counts.
+MIN_DWELL_SEC = 30
+
+
+def collect_focus(start_dt, end_dt, app_paths, other_events):
+    """iTerm2 focus ticks: <epoch>\t<cwd>\t<branch>. Groups consecutive same-lane
+    ticks into dwell runs — broken by any signal on a different lane — and emits
+    the runs that span >= MIN_DWELL_SEC as focus events on the worktree lane."""
+    events = []
+    lanes = {}
+    if not FOCUS_LOG.exists():
+        return events, lanes
+
+    ticks = []
+    for line in FOCUS_LOG.read_text(errors="replace").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        try:
+            epoch = int(parts[0])
+        except ValueError:
+            continue
+        cwd = parts[1]
+        branch = parts[2] if len(parts) > 2 and parts[2] else None
+        local = dt.datetime.fromtimestamp(epoch).astimezone()
+        if not (start_dt <= local <= end_dt):
+            continue
+        lm = lane_meta(cwd, app_paths)
+        ticks.append({"epoch": epoch, "local": local, "lm": lm, "lane": lm["id"],
+                      "branch": branch})
+    if not ticks:
+        return events, lanes
+
+    # Merge focus ticks with the other signals as a single time-ordered stream;
+    # a signal on a different lane breaks the current dwell run. kind 0 = focus
+    # tick, kind 1 = other signal (sorts after a same-instant tick).
+    markers = [(t["epoch"], 0, t) for t in ticks]
+    for e in other_events:
+        d = to_local(e["ts"])
+        if d:
+            markers.append((d.timestamp(), 1, e["lane"]))
+    markers.sort(key=lambda m: (m[0], m[1]))
+
+    run = []        # focus ticks of the current run (all on run_lane)
+    run_lane = None
+
+    def flush():
+        nonlocal run, run_lane
+        if run and (run[-1]["epoch"] - run[0]["epoch"]) >= MIN_DWELL_SEC:
+            for t in run:
+                lanes[t["lane"]] = t["lm"]
+                lc = t["local"]
+                events.append({
+                    "date": lc.date().isoformat(),
+                    "minute": lc.hour * 60 + lc.minute,
+                    "ts": lc.isoformat(),
+                    "lane": t["lane"],
+                    "jira": jira_from(t["branch"]),
+                    "branch": t["branch"],
+                    "type": "focus",
+                    "preview": None,
+                })
+        run = []
+        run_lane = None
+
+    for _, kind, payload in markers:
+        if kind == 0:  # focus tick
+            t = payload
+            if run_lane is None or t["lane"] == run_lane:
+                run.append(t)
+                run_lane = t["lane"]
+            else:  # focus jumped to another lane — close the old run, open a new one
+                flush()
+                run = [t]
+                run_lane = t["lane"]
+        elif run_lane is not None and payload != run_lane:  # other lane fired
+            flush()
+    flush()
+    return events, lanes
+
+
 def build_weeks(start_date, today):
     """Mon–Fri columns per ISO week across the window."""
     weeks = []
@@ -521,9 +639,12 @@ def main():
     p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
     c_events, c_lanes = collect_checkouts(start_dt, end_dt, app_paths)
     r_events, r_lanes = collect_reviews(start_dt, end_dt)
+    # focus dwell is broken by any other-lane signal, so it needs the rest first
+    f_events, f_lanes = collect_focus(start_dt, end_dt, app_paths,
+                                      p_events + c_events + r_events)
 
-    lanes = {**p_lanes, **c_lanes, **r_lanes}
-    events = sorted(p_events + c_events + r_events, key=lambda e: e["ts"])
+    lanes = {**p_lanes, **c_lanes, **r_lanes, **f_lanes}
+    events = sorted(p_events + c_events + r_events + f_events, key=lambda e: e["ts"])
 
     blob = {
         "generatedAt": end_dt.isoformat(),

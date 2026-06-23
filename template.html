@@ -115,6 +115,7 @@ function frameFor(date, base){
 const FULL_DAY = 450, QUARTER = 15;
 let TT_FIT   = localStorage.getItem('tt_fit')==='1';
 let TT_ROUND = localStorage.getItem('tt_round')==='1';
+let TT_OMIT  = localStorage.getItem('tt_omit')==='1';   // drop "no jira" before fit/round
 
 // largest-remainder apportionment: round each value to a multiple of QUARTER
 // so the rounded values sum exactly to `target`. One strategy, fit or no fit.
@@ -158,7 +159,9 @@ function daySummary(date, segs){
   const mtgs=meetingsForDay(date);
   for(const mt of mtgs){ if(!isOn(mt)) continue;
     raw.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
-  const items = applyAdjust(raw);
+  // drop "no jira" first, so Fit redistributes its time into the real jiras (still 7:30)
+  const pool = TT_OMIT ? raw.filter(it=>it.key!=='__none__') : raw;
+  const items = applyAdjust(pool);
   return {items, things:Object.keys(jt).length, attended:mtgs.filter(isOn).length, total:mtgs.length,
           totalMins:items.reduce((s,i)=>s+i.mins,0)};
 }
@@ -172,9 +175,11 @@ function renderAdjust(){
   const pill=(on)=> on?'bg-blue-500 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10';
   const note = TT_FIT ? 'scaled to 7:30 (meetings fixed)' : '';
   el.innerHTML = `<span class="text-slate-400 mr-1 font-medium">Timesheet:</span>
+    <button id="tOmit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_OMIT)}">Omit no-JIRA</button>
     <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to 7:30</button>
     <button id="tRound" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_ROUND)}">Round to 15m</button>
     ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?' · 15-min chunks':''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">15-min chunks</span>`:'')}`;
+  document.getElementById('tOmit').onclick=()=>{ TT_OMIT=!TT_OMIT; localStorage.setItem('tt_omit',TT_OMIT?'1':'0'); refreshAll(); };
   document.getElementById('tFit').onclick=()=>{ TT_FIT=!TT_FIT; localStorage.setItem('tt_fit',TT_FIT?'1':'0'); refreshAll(); };
   document.getElementById('tRound').onclick=()=>{ TT_ROUND=!TT_ROUND; localStorage.setItem('tt_round',TT_ROUND?'1':'0'); refreshAll(); };
 }
@@ -183,14 +188,16 @@ function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').s
 function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
 function fmt(min){ const h=Math.floor(min/60), m=Math.round(min%60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
 function dur(min){ const h=Math.floor(min/60), m=Math.round(min%60); return (h?h+'h ':'')+(m?m+'m':(h?'':'0m')); }
-function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':(t==='review'?'PR review':t))); }
+function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':(t==='review'?'PR review':(t==='focus'?'terminal focus':t)))); }
 
 // ---------- per-day model (latest-wins attention) ----------
 function dayEvents(date){ return DATA.events.filter(e=>e.date===date).sort((a,b)=>a.minute-b.minute); }
 function dayModel(date){
   const evs = dayEvents(date);
   if(!evs.length) return null;
-  const idle = FRAME.idleTailMin;
+  // Today is still in progress: the 30-min idle tail would invent time past now,
+  // so only past days get it — today ends exactly at the last signal.
+  const idle = (date === DATA.window?.end) ? 0 : FRAME.idleTailMin;
   const activeStart = evs[0].minute;
   const activeEnd = evs[evs.length-1].minute + idle;
   let raw=[];
@@ -240,11 +247,23 @@ function barHTML(m, segs, widthStyle, opts={}){
          ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${textCol}">${label}</span>`:''}</div>`;
   }
   if(detail && opts.events){
+    // passive, dense signals (iTerm focus + GitHub review) → thin red lines, behind
     for(const e of opts.events){
+      if(e.type!=='focus' && e.type!=='review') continue;
       const y=yFor(e.minute,m);
-      const isPrompt = e.type==='prompt';
+      h+=`<div class="absolute pointer-events-none" title="${fmt(e.minute)} ${typeLabel(e.type)}"
+           style="top:${y}px;left:0;width:6px;height:1.5px;z-index:5;background:rgba(239,68,68,.85)"></div>`;
+    }
+    // deliberate signals (prompt, checkout) → markers, always on top of the red lines
+    for(const e of opts.events){
+      if(e.type==='focus' || e.type==='review') continue;
+      const y=yFor(e.minute,m);
+      const bubble = e.type==='prompt';  // tiny speech bubble for prompts, diamond for checkouts
+      const shape = bubble
+        ? 'width:9px;height:7px;border-radius:3px 3px 3px 0'
+        : 'width:8px;height:8px;transform:rotate(45deg)';
       h+=`<div class="notch" title="${fmt(e.minute)} ${typeLabel(e.type)}"
-           style="top:${y-4}px;left:2px;width:8px;height:8px;z-index:7;${isPrompt?'border-radius:50%':'transform:rotate(45deg)'};background:#fff;box-shadow:0 0 0 1.5px rgba(0,0,0,.75)"></div>`;
+           style="top:${y-4}px;right:2px;z-index:8;${shape};background:#fff;box-shadow:0 0 0 1.5px rgba(0,0,0,.75)"></div>`;
     }
   }
   return h+`</div>`;
@@ -350,7 +369,7 @@ function openDay(date){
   const axisHead = `<div><div class="text-center text-[11px] font-semibold mb-1.5 invisible" aria-hidden="true">x</div>${hourAxis(mf,true)}</div>`;
   let cols = `<div class="flex gap-4 items-start">${axisHead}`;
   cols += `<div class="pl-1"><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
-           ${barHTML(mf,rsegs,'width:96px',{detail:true,events:m?m.evs:[]})}</div>`;
+           ${barHTML(mf,rsegs,'width:96px',{detail:true})}</div>`;
   if(mtgs.length){
     cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${MEETING}">Meetings</div>${meetingColHTML(date,mf)}</div>`;
   }
@@ -369,7 +388,7 @@ function openDay(date){
   const tot=Object.entries(rtot).sort((a,b)=>b[1]-a[1]);
   const span = rsegs.length ? `active ${dur(rsegs[rsegs.length-1].end-rsegs[0].start)} (${fmt(rsegs[0].start)}–${fmt(rsegs[rsegs.length-1].end)})` : '';
   let totHTML=`<div class="mt-5 pt-4 border-t border-white/10">
-    <div class="text-xs text-slate-400 mb-2">Rough breakdown · ${span} · ● prompt ◆ checkout · ▦ meeting (click to toggle)</div>
+    <div class="text-xs text-slate-400 mb-2">Rough breakdown · ${span} · <span style="display:inline-block;width:9px;height:7px;border-radius:3px 3px 3px 0;background:currentColor;vertical-align:middle"></span> prompt ◆ checkout · <span style="color:rgba(239,68,68,.85)">▬</span> focus/review · ▦ meeting (click to toggle)</div>
     <div class="flex flex-wrap gap-2">`;
   for(const [j,mins] of tot){
     const isM = j==='__meeting__';

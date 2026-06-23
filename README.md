@@ -27,6 +27,9 @@ normalises everything to **local time**, and injects a JSON blob into
 - **gco/gcod checkouts** — appended to `~/.timetrack/checkouts.log` by the shell
   wrapper (see *Shell logging* below). Closes the gap where bare `gcod` (fzf)
   resolves the branch to a SHA and loses the name.
+- **Terminal focus** — `~/.timetrack/focus.log`, written by the iTerm2 focus
+  daemon (see [FOCUS.md](FOCUS.md)). Records which worktree was on screen each
+  minute, turning latest-wins inference into measurement. Optional.
 
 ## Shell logging (gco/gcod)
 
@@ -49,7 +52,8 @@ tab to start logging now. A timestamped backup of the original sits at
 
 **Attention model:** latest-wins, no mid-day gaps. The lane you last acted in stays
 active until your next event lands in a different lane. The day runs from your first
-signal to your last signal + 30min idle tail, framed 8am–5pm.
+signal to your last signal + 30min idle tail, framed 8am–5pm. Today is excluded from
+the tail — it ends exactly at the last signal, so it never shows time you've not spent yet.
 
 ## Views
 
@@ -99,6 +103,15 @@ Test the host alone (no extension needed):
 ```bash
 python3 -c 'import struct,sys,json; m=json.dumps({"epoch":1,"jira":"PBL-1"}).encode(); sys.stdout.buffer.write(struct.pack("<I",len(m))+m)' | bin/timetrack-review-host
 ```
+
+## Terminal focus (iTerm2 daemon)
+
+`bin/timetrack-focus.py` is a standalone iTerm2 AutoLaunch daemon that logs which
+worktree was on screen each minute, turning latest-wins inference into
+measurement. Setup, internals and tuning live in **[FOCUS.md](FOCUS.md)** —
+short version: enable iTerm2's Python API, run `./bin/install-focus-daemon.sh`,
+start it from Scripts → AutoLaunch. The builder folds `~/.timetrack/focus.log`
+in automatically when it's present.
 
 ## Not yet wired (fast-follows)
 - Per-JIRA totals in the week view; days-as-rows table shell.
