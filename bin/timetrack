@@ -17,7 +17,12 @@ import glob
 import json
 import os
 import re
+import signal
+import socket
+import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -30,6 +35,9 @@ REVIEW_LANE = "__github_review__"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 TEMPLATE = Path(__file__).resolve().parent.parent / "template.html"
 OUT = Path(__file__).resolve().parent.parent / "out" / "timetrack.html"
+PID_FILE = HOME / ".timetrack" / "serve.pid"   # background --serve daemon state
+SERVE_LOG = HOME / ".timetrack" / "serve.log"
+DEFAULT_PORT = 8765
 
 JIRA_RE = re.compile(r"([A-Za-z]+-\d+)")
 
@@ -67,6 +75,12 @@ def to_local(ts_str):
     return d.astimezone()
 
 
+def minute_of(local):
+    """Minutes-since-midnight as a FRACTION, so sub-minute signals don't land on
+    the same integer tick and annihilate each other in the latest-wins model."""
+    return round(local.hour * 60 + local.minute + local.second / 60, 3)
+
+
 def jira_from(branch):
     if not branch:
         return None
@@ -84,16 +98,51 @@ def name_from_branch(branch, jira):
     return s or None
 
 
+def parse_review_title(title):
+    """('PR title', 'author') from a GitHub PR page <title>:
+    'TRM-466 Enable strictFunctionTypes by NickR49 · Pull Request #13559 · org/repo'
+    -> ('TRM-466 Enable strictFunctionTypes', 'NickR49')."""
+    if not title or title.lower().startswith("http"):
+        return None, None
+    head = re.split(r"\s+·\s+Pull Request", title)[0]   # drop the GitHub page chrome
+    m = re.search(r"\s+by\s+(\S+)\s*$", head)
+    author = m.group(1) if m else None
+    pr = re.sub(r"\s+by\s+\S+\s*$", "", head).strip()    # drop trailing "by <login>"
+    return (pr or None), author
+
+
+def name_from_review_title(title, jira):
+    """Fallback name for a review-only jira when no branch was logged — derived
+    from the PR title (minus the jira tag)."""
+    pr, _ = parse_review_title(title)
+    if not pr:
+        return None
+    if jira:
+        pr = re.sub(r"^" + re.escape(jira) + r"[\s:_-]*", "", pr, flags=re.I).strip()
+    return pr or None
+
+
 def build_jira_names(events, overrides):
     from collections import Counter, defaultdict
-    cand = defaultdict(Counter)
+    branch_cand = defaultdict(Counter)
+    review_cand = defaultdict(Counter)
     for e in events:
-        if e.get("jira") and e.get("branch"):
-            n = name_from_branch(e["branch"], e["jira"])
+        j = e.get("jira")
+        if not j:
+            continue
+        if e.get("branch"):
+            n = name_from_branch(e["branch"], j)
             if n:
-                cand[e["jira"]][n] += 1
-    names = {j: c.most_common(1)[0][0] for j, c in cand.items()}
-    names.update(overrides or {})  # config wins
+                branch_cand[j][n] += 1
+        elif e.get("type") == "review" and e.get("preview"):
+            n = name_from_review_title(e["preview"], j)
+            if n:
+                review_cand[j][n] += 1
+    # PR titles name review-only jiras; a branch slug wins when there's real work;
+    # config overrides win over both.
+    names = {j: c.most_common(1)[0][0] for j, c in review_cand.items()}
+    names.update({j: c.most_common(1)[0][0] for j, c in branch_cand.items()})
+    names.update(overrides or {})
     return names
 
 
@@ -184,7 +233,7 @@ def collect_prompts(start_dt, end_dt, app_paths):
                 lanes[lm["id"]] = lm
                 events.append({
                     "date": local.date().isoformat(),
-                    "minute": local.hour * 60 + local.minute,
+                    "minute": minute_of(local),
                     "ts": local.isoformat(),
                     "lane": lm["id"],
                     "jira": jira_from(d.get("gitBranch")),
@@ -460,9 +509,12 @@ MIN_TICKS = 2
 
 
 def collect_reviews(start_dt, end_dt):
-    """GitHub PR review heartbeat ticks: <epoch>\t<jira>\t<url>\t<title>."""
+    """GitHub PR review heartbeat ticks: <epoch>\t<jira>\t<url>\t<title>\t<branch>.
+    Returns (events, lane, meta) — meta maps each reviewed jira to the PR title,
+    author and url for the legend popover. The branch (5th field, absent on older
+    log lines) names the review lane via the same slug rule as worktree branches."""
     if not REVIEW_LOG.exists():
-        return [], {}
+        return [], {}, {}
     raw = []
     for line in REVIEW_LOG.read_text(errors="replace").splitlines():
         parts = line.split("\t")
@@ -475,16 +527,18 @@ def collect_reviews(start_dt, end_dt):
         jira = parts[1] if len(parts) > 1 else ""
         url = parts[2] if len(parts) > 2 else ""
         title = parts[3] if len(parts) > 3 else ""
+        branch = parts[4] if len(parts) > 4 and parts[4] else None
         local = dt.datetime.fromtimestamp(epoch).astimezone()
         if not (start_dt <= local <= end_dt):
             continue
         raw.append({"epoch": epoch, "local": local,
-                    "jira": jira or jira_from(title) or jira_from(url),
-                    "title": title, "url": url})
+                    "jira": jira or jira_from(branch) or jira_from(title) or jira_from(url),
+                    "title": title, "url": url, "branch": branch})
     raw.sort(key=lambda t: t["epoch"])
 
     # group into dwell sessions, keep only those with >= MIN_TICKS ticks
     events = []
+    meta = {}
     i = 0
     while i < len(raw):
         j = i + 1
@@ -492,23 +546,29 @@ def collect_reviews(start_dt, end_dt):
                and raw[j]["jira"] == raw[i]["jira"]):
             j += 1
         if j - i >= MIN_TICKS:
+            pr_title, author = parse_review_title(raw[j - 1]["title"])
             for t in raw[i:j]:
+                jira = t["jira"] or None
                 lc = t["local"]
                 events.append({
                     "date": lc.date().isoformat(),
-                    "minute": lc.hour * 60 + lc.minute,
+                    "minute": minute_of(lc),
                     "ts": lc.isoformat(),
                     "lane": REVIEW_LANE,
-                    "jira": t["jira"] or None,
-                    "branch": None,
+                    "jira": jira,
+                    "branch": t["branch"],
                     "type": "review",
-                    "preview": t["title"] or t["url"],
+                    "preview": pr_title or t["title"] or t["url"],
                 })
+            jira = raw[j - 1]["jira"] or None
+            if jira:  # most recent session's PR details win, for the popover
+                meta[jira] = {"title": pr_title or raw[j - 1]["title"],
+                              "author": author, "url": raw[j - 1]["url"]}
         i = j
 
     lane = {REVIEW_LANE: {"id": REVIEW_LANE, "path": REVIEW_LANE, "label": "GitHub review",
                           "repo": "review", "isApp": False, "isReview": True}} if events else {}
-    return events, lane
+    return events, lane, meta
 
 
 # A focus dwell is a run of consecutive same-lane ticks with NO signal from a
@@ -516,8 +576,12 @@ def collect_reviews(start_dt, end_dt):
 # proof you'd moved on, so it breaks the run (the run resumes on the next tick).
 # There is no max time gap: if nothing else fired, two same-lane ticks bridge
 # however far apart they are — "no competing signal, so you were on that ticket"
-# is the best available guess. A run is kept only if it spans >= MIN_DWELL_SEC, so
-# a single fly-by glance (one tick, zero span) never counts.
+# is the best available guess.
+#
+# A run is kept if it spans >= MIN_DWELL_SEC, OR if a deliberate same-lane signal
+# (a prompt / checkout) lands inside it — typing in a worktree is hard proof you
+# were there, so it promotes even a single focus tick into real attention. Only a
+# bare lone tick with nothing to back it up is dropped as a fly-by.
 MIN_DWELL_SEC = 30
 
 
@@ -562,16 +626,18 @@ def collect_focus(start_dt, end_dt, app_paths, other_events):
 
     run = []        # focus ticks of the current run (all on run_lane)
     run_lane = None
+    corroborated = False   # a same-lane prompt/checkout landed inside this run
 
     def flush():
-        nonlocal run, run_lane
-        if run and (run[-1]["epoch"] - run[0]["epoch"]) >= MIN_DWELL_SEC:
+        nonlocal run, run_lane, corroborated
+        span = run[-1]["epoch"] - run[0]["epoch"] if run else 0
+        if run and (span >= MIN_DWELL_SEC or corroborated):
             for t in run:
                 lanes[t["lane"]] = t["lm"]
                 lc = t["local"]
                 events.append({
                     "date": lc.date().isoformat(),
-                    "minute": lc.hour * 60 + lc.minute,
+                    "minute": minute_of(lc),
                     "ts": lc.isoformat(),
                     "lane": t["lane"],
                     "jira": jira_from(t["branch"]),
@@ -581,6 +647,7 @@ def collect_focus(start_dt, end_dt, app_paths, other_events):
                 })
         run = []
         run_lane = None
+        corroborated = False
 
     for _, kind, payload in markers:
         if kind == 0:  # focus tick
@@ -592,8 +659,11 @@ def collect_focus(start_dt, end_dt, app_paths, other_events):
                 flush()
                 run = [t]
                 run_lane = t["lane"]
-        elif run_lane is not None and payload != run_lane:  # other lane fired
-            flush()
+        elif run_lane is not None:  # a deliberate signal (payload = its lane)
+            if payload == run_lane:
+                corroborated = True   # typing here proves the focus tick was real
+            else:
+                flush()               # moved to a different ticket — run ends
     flush()
     return events, lanes
 
@@ -625,20 +695,15 @@ def build_weeks(start_date, today):
     return weeks
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Build the timetrack visual.")
-    ap.add_argument("-w", "--weeks", type=int, default=4,
-                    help="number of weeks to scan, ending this week (default 4)")
-    ap.add_argument("--json", action="store_true", help="print JSON to stdout, don't write HTML")
-    args = ap.parse_args()
-
+def build_blob(weeks):
+    """Re-derive everything from the signal sources and return the data blob."""
     cfg = load_config()
     app_paths = cfg["app_paths"]
-    start_dt, end_dt, start_date, today = window_bounds(args.weeks)
+    start_dt, end_dt, start_date, today = window_bounds(weeks)
 
     p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
     c_events, c_lanes = collect_checkouts(start_dt, end_dt, app_paths)
-    r_events, r_lanes = collect_reviews(start_dt, end_dt)
+    r_events, r_lanes, r_meta = collect_reviews(start_dt, end_dt)
     # focus dwell is broken by any other-lane signal, so it needs the rest first
     f_events, f_lanes = collect_focus(start_dt, end_dt, app_paths,
                                       p_events + c_events + r_events)
@@ -646,38 +711,237 @@ def main():
     lanes = {**p_lanes, **c_lanes, **r_lanes, **f_lanes}
     events = sorted(p_events + c_events + r_events + f_events, key=lambda e: e["ts"])
 
-    blob = {
+    return {
         "generatedAt": end_dt.isoformat(),
         "tz": str(end_dt.tzinfo),
         "window": {
             "start": start_dt.date().isoformat(),
             "end": today.isoformat(),
-            "weeks": args.weeks,
+            "weeks": weeks,
         },
         "frame": {"startMin": 8 * 60, "endMin": 17 * 60, "idleTailMin": 30},
         "lanes": lanes,
         "events": events,
         "jiraNames": build_jira_names(events, cfg.get("jira_names")),
+        "reviewMeta": r_meta,
         "meetings": collect_meetings(cfg, start_date, today),
         "weeks": build_weeks(start_date, today),
         "config": {"appPaths": app_paths, "skipMeetings": cfg["skip_meetings"]},
     }
 
-    if args.json:
-        print(json.dumps(blob, indent=2))
+
+def render_html(blob):
+    payload = "window.__TIMETRACK__ = " + json.dumps(blob) + ";"
+    return TEMPLATE.read_text().replace("/*__TIMETRACK_DATA__*/", payload)
+
+
+def write_out(weeks):
+    """Build + render + write out/timetrack.html. Returns the blob."""
+    blob = build_blob(weeks)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(render_html(blob))
+    return blob
+
+
+# ------------------------- serve / daemon -------------------------
+
+def _read_pidfile():
+    try:
+        parts = PID_FILE.read_text().split()
+        return int(parts[0]), (int(parts[1]) if len(parts) > 1 else DEFAULT_PORT)
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _port_up(port, timeout=4.0):
+    """True once the port accepts a connection, else False after timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), 0.2):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def _open_browser(port):
+    """Open the browser once the server is listening. Only usable while this
+    process stays alive (foreground serve) — a backgrounded start exits too soon,
+    so it tells the user to run --open instead."""
+    def go():
+        if _port_up(port):
+            os.system(f"open http://localhost:{port}")
+    threading.Thread(target=go, daemon=True).start()
+
+
+def _serve(weeks, port, open_browser=True):
+    """Foreground HTTP server. GET / serves the last build; GET /regenerate
+    re-greps the sources and rewrites it, for the in-page Regenerate button."""
+    import http.server
+    import socketserver
+
+    write_out(weeks)  # initial build
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass  # quiet; the access log isn't useful here
+
+        def _send(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            if path in ("/", "/index.html"):
+                try:
+                    self._send(200, OUT.read_bytes(), "text/html; charset=utf-8")
+                except OSError:
+                    self._send(500, b"build missing", "text/plain")
+            elif path == "/regenerate":
+                try:
+                    blob = write_out(weeks)
+                    self._send(200, json.dumps({"ok": True, "events": len(blob["events"])}).encode(),
+                               "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
+                               "application/json")
+            else:
+                self._send(404, b"not found", "text/plain")
+
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    try:
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        print(f"could not bind port {port}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if open_browser:
+        _open_browser(port)
+    print(f"timetrack serving on http://localhost:{port}  (Ctrl-C to stop)")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+
+def serve_start(weeks, port, daemon):
+    pid, oldport = _read_pidfile()
+    if pid and _alive(pid):
+        print(f"already serving (pid {pid}) on http://localhost:{oldport}  (open it with --open)")
+        return
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if daemon:
+        logf = open(SERVE_LOG, "a")
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__),
+             "--_serve-run", "--weeks", str(weeks), "--port", str(port)],
+            stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+        PID_FILE.write_text(f"{proc.pid} {port}\n")
+        if _port_up(port):
+            print(f"timetrack serving in background (pid {proc.pid}) on http://localhost:{port}")
+            print(f"  open: {Path(__file__).name} --open")
+            print(f"  stop: {Path(__file__).name} --stop")
+        else:
+            print(f"server didn't come up on port {port} — see {SERVE_LOG}", file=sys.stderr)
+            PID_FILE.unlink(missing_ok=True)
+    else:
+        PID_FILE.write_text(f"{os.getpid()} {port}\n")
+        try:
+            _serve(weeks, port)
+        finally:
+            if _read_pidfile()[0] == os.getpid():
+                PID_FILE.unlink(missing_ok=True)
+
+
+def serve_open():
+    pid, port = _read_pidfile()
+    if pid and _alive(pid):
+        os.system(f"open http://localhost:{port}")
+    else:
+        print("not running — start it with --daemon (or --serve)")
+
+
+def serve_stop():
+    pid, port = _read_pidfile()
+    if not pid or not _alive(pid):
+        print("not running")
+        PID_FILE.unlink(missing_ok=True)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"stopped (pid {pid})")
+    except OSError as e:
+        print(f"could not stop pid {pid}: {e}", file=sys.stderr)
+    PID_FILE.unlink(missing_ok=True)
+
+
+def serve_status():
+    pid, port = _read_pidfile()
+    if pid and _alive(pid):
+        print(f"running (pid {pid}) on http://localhost:{port}")
+    else:
+        print("not running")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Build the timetrack visual.")
+    ap.add_argument("-w", "--weeks", type=int, default=4,
+                    help="number of weeks to scan, ending this week (default 4)")
+    ap.add_argument("--json", action="store_true", help="print JSON to stdout, don't write HTML")
+    ap.add_argument("--serve", action="store_true",
+                    help="serve on http://localhost with a Regenerate button (foreground)")
+    ap.add_argument("--daemon", action="store_true",
+                    help="like --serve but in the background; stop it with --stop")
+    ap.add_argument("--stop", action="store_true", help="stop a background server")
+    ap.add_argument("--open", action="store_true", help="open the running server in your browser")
+    ap.add_argument("--status", action="store_true", help="report whether a background server is running")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT,
+                    help=f"port for --serve/--daemon (default {DEFAULT_PORT})")
+    ap.add_argument("--_serve-run", dest="serve_run", action="store_true", help=argparse.SUPPRESS)
+    args = ap.parse_args()
+
+    if args.serve_run:        # internal: the backgrounded child runs the server
+        _serve(args.weeks, args.port, open_browser=False)
+        return
+    if args.stop:
+        serve_stop()
+        return
+    if args.open:
+        serve_open()
+        return
+    if args.status:
+        serve_status()
+        return
+    if args.serve or args.daemon:
+        serve_start(args.weeks, args.port, daemon=args.daemon)
         return
 
+    if args.json:
+        print(json.dumps(build_blob(args.weeks), indent=2))
+        return
     if not TEMPLATE.exists():
-        print(json.dumps(blob, indent=2))
+        print(json.dumps(build_blob(args.weeks), indent=2))
         print(f"\n(no template at {TEMPLATE} yet — printed JSON instead)", file=sys.stderr)
         return
 
-    html = TEMPLATE.read_text()
-    payload = "window.__TIMETRACK__ = " + json.dumps(blob) + ";"
-    html = html.replace("/*__TIMETRACK_DATA__*/", payload)
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(html)
-    print(f"wrote {OUT}  ({len(events)} events, {len(lanes)} lanes, {len(blob['weeks'])} weeks)")
+    blob = write_out(args.weeks)
+    print(f"wrote {OUT}  ({len(blob['events'])} events, {len(blob['lanes'])} lanes, {len(blob['weeks'])} weeks)")
     os.system(f"open {OUT}")
 
 

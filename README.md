@@ -14,6 +14,25 @@ Rough beats precise. You stay in the loop: it shows you the picture, you read it
 ./bin/timetrack --json     # dump the raw JSON blob to stdout (debugging)
 ```
 
+### Serve mode (live Regenerate button)
+
+Opening the built file as `file://` is fine, but to re-scan your signals without
+going back to the terminal, run a tiny local server instead. Served over
+`http://localhost`, the view grows a **Regenerate** button that re-greps the
+sources in place (and localStorage is rock-solid over a real origin, unlike
+`file://`).
+
+```bash
+./bin/timetrack --daemon   # serve in the background
+./bin/timetrack --open     # open the running server in your browser
+./bin/timetrack --status   # is it running, and where?
+./bin/timetrack --stop     # stop the background server
+./bin/timetrack --serve    # foreground instead — opens the browser, Ctrl-C to stop
+./bin/timetrack --daemon --port 9000   # pick a port (default 8765)
+```
+
+State lives in `~/.timetrack/serve.pid`; background output in `~/.timetrack/serve.log`.
+
 ## How it works
 
 Dumb builder, smart template. `bin/timetrack` greps the durable signal sources,
@@ -84,13 +103,17 @@ emit a tick even when the browser isn't the focused window (so reading a PR on a
 second monitor while you work elsewhere still counts), plus a 75s heartbeat while
 the tab is focused for motionless reading. Everything is debounced to one tick
 per 30s, and the builder's dwell filter needs 2 ticks, so a parked tab or a
-scroll-by doesn't count. Ticks land in `~/.timetrack/review.log` and the builder
-stitches them into review intervals on a synthetic `GitHub review` lane.
+scroll-by doesn't count. Each tick logs `epoch ⇥ jira ⇥ url ⇥ title ⇥ branch`
+to `~/.timetrack/review.log`; the builder stitches them into review intervals on
+a synthetic `GitHub review` lane.
 
 Review time attaches to the PR's JIRA (inferred from branch/title, re-inferred in
-the builder from the logged title/url if the scrape missed). If that JIRA has no
-worktree activity that day, the row is badged **review** (you reviewed someone
-else's ticket); otherwise it folds into your own work on it.
+the builder from the logged title/url if the scrape missed). A review-only JIRA is
+named from its PR **branch** (the PR title is the fallback for older log lines that
+predate branch capture); hovering its legend entry pops the full PR title and
+author. If that JIRA has no worktree activity that day, the row is badged
+**review** (you reviewed someone else's ticket); otherwise it folds into your own
+work on it.
 
 Wiring (a Chrome extension can't write to disk, so a native-messaging host bridges it):
 1. `chrome://extensions` → enable Developer mode → **Load unpacked** → pick `extension/`.
