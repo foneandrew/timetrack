@@ -26,12 +26,22 @@ function visible() {
   return document.visibilityState === "visible";
 }
 
+function branchNames() {
+  return [...document.querySelectorAll('[data-component="BranchName"]')]
+    .map(e => (e.textContent || "").trim()).filter(Boolean);
+}
+
 function inferJira() {
   const title = document.querySelector(".js-issue-title")?.textContent || document.title || "";
-  const branches = [...document.querySelectorAll('[data-component="BranchName"]')]
-    .map(e => e.textContent || "").join(" ");
-  const m = (title + " " + branches).match(/([A-Za-z]+-\d+)/);
+  const m = (title + " " + branchNames().join(" ")).match(/([A-Za-z]+-\d+)/);
   return m ? m[1].toUpperCase() : "";
+}
+
+// the PR's head (feature) branch — prefer the one carrying a jira tag, else the
+// last BranchName on the page (head is rendered after base)
+function prBranch() {
+  const names = branchNames();
+  return names.find(n => /[A-Za-z]+-\d+/.test(n)) || names[names.length - 1] || "";
 }
 
 function maybeTick() {
@@ -45,7 +55,8 @@ function maybeTick() {
       epoch: Math.floor(now / 1000),
       jira: inferJira(),
       url: location.href,
-      title: document.title
+      title: document.title,
+      branch: prBranch()
     });
   } catch (e) { /* SW asleep / context invalidated — next interaction retries */ }
 }

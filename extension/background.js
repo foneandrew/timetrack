@@ -12,7 +12,7 @@ function logTick(tick) {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "review-tick") {
-    logTick({ epoch: msg.epoch, jira: msg.jira, url: msg.url, title: msg.title });
+    logTick({ epoch: msg.epoch, jira: msg.jira, url: msg.url, title: msg.title, branch: msg.branch });
   }
 });
 

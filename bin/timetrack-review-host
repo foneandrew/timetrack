@@ -8,7 +8,7 @@ Native messaging framing: 4-byte little-endian length prefix + UTF-8 JSON,
 on both read and write. CRITICAL: nothing may go to stdout except framed
 responses — a stray print corrupts the protocol. Debug goes to stderr.
 
-Log line: <epoch>\t<jira>\t<url>\t<title>
+Log line: <epoch>\t<jira>\t<url>\t<title>\t<branch>
 """
 import sys
 import struct
@@ -51,7 +51,8 @@ def main():
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         epoch = int(msg.get("epoch") or time.time())
-        line = "\t".join([str(epoch), clean(msg.get("jira")), clean(msg.get("url")), clean(msg.get("title"))])
+        line = "\t".join([str(epoch), clean(msg.get("jira")), clean(msg.get("url")),
+                          clean(msg.get("title")), clean(msg.get("branch"))])
         with open(LOG, "a") as f:
             f.write(line + "\n")
         send_message({"ok": True})
