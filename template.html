@@ -20,6 +20,8 @@
   .legitem { transition: opacity .12s ease; cursor: default; }
   .tab { transition: all .12s ease; }
   .notch { position:absolute; pointer-events:none; }
+  @keyframes ttspin { to { transform: rotate(360deg); } }
+  .spin { display:inline-block; width:11px; height:11px; vertical-align:-1px; border:2px solid rgba(255,255,255,.3); border-top-color:#fff; border-radius:50%; animation:ttspin .6s linear infinite; }
   #tip { position:fixed; z-index:50; pointer-events:none; max-width:300px; opacity:0; transition:opacity .08s ease; }
 </style>
 </head>
@@ -47,6 +49,50 @@
       <button onclick="closeModal()" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/10">esc ✕</button>
     </div>
     <div id="modalBody" class="overflow-x-auto"></div>
+  </div>
+</div>
+
+<div id="settings" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-30 flex items-start justify-center overflow-auto py-12 px-4">
+  <div class="bg-[#2b3242] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[420px] p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">Settings</h2>
+      <button onclick="closeSettings()" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/10">esc ✕</button>
+    </div>
+    <div class="space-y-3 text-sm">
+      <label class="flex items-center justify-between gap-3" title="Top of the day bar — the start of your framed working day. Activity before it still shows; this just sets where the chart begins.">
+        <span class="text-slate-300">Day start <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgStart" type="time" class="bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+      <label class="flex items-center justify-between gap-3" title="Bottom of the day bar — the end of your framed working day. Activity after it still shows; this just sets where the chart ends.">
+        <span class="text-slate-300">Day end <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgEnd" type="time" class="bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+      <label class="flex items-center justify-between gap-3" title="When the 'Fit to' toggle is on, your tracked time is scaled to total this much, with meetings held fixed. Your contracted day length.">
+        <span class="text-slate-300">Fit-to target <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgFull" type="time" class="bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+      <label class="flex items-center justify-between gap-3" title="How long your last signal keeps counting as active before the day ends. Past days only — today always stops at your last signal.">
+        <span class="text-slate-300">End-of-day stretch (min) <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgIdle" type="number" min="0" step="5" class="w-24 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+      <label class="flex items-center justify-between gap-3" title="When the 'Round to' toggle is on, each timesheet row is rounded to a multiple of this many minutes, still summing to the same total.">
+        <span class="text-slate-300">Round to (min) <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgRound" type="number" min="1" step="1" class="w-24 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+      <label class="flex items-center justify-between gap-3" title="How many weeks back to scan for signals, ending this week. The -w command-line flag overrides this for a single run.">
+        <span class="text-slate-300">Weeks to scan <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgWeeks" type="number" min="1" step="1" class="w-24 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+    </div>
+    <p class="text-[11px] text-slate-500 mt-3">Saves to <span class="mono">config.json</span> and rebuilds.</p>
+    <div class="flex justify-end gap-2 mt-4">
+      <button onclick="closeSettings()" class="text-sm px-3 py-1.5 rounded-lg text-slate-300 hover:bg-white/10">Cancel</button>
+      <button id="cfgSave" onclick="saveSettings()" class="text-sm px-4 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-400 text-white font-medium">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="setup" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-30 flex items-start justify-center overflow-auto py-12 px-4">
+  <div class="bg-[#2b3242] border border-white/10 rounded-2xl shadow-2xl w-full max-w-[480px] p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-white">Integrations</h2>
+      <button onclick="closeSetup()" class="text-slate-300 hover:text-white text-sm px-3 py-1.5 rounded-lg hover:bg-white/10">esc ✕</button>
+    </div>
+    <div id="setupBody"></div>
   </div>
 </div>
 
@@ -119,7 +165,7 @@ function frameFor(date, base){
   return {frameStart:s, frameEnd:e};
 }
 // ---------- timesheet adjustments (fit to 7:30 / round to 15m) ----------
-const FULL_DAY = 450, QUARTER = 15;
+const FULL_DAY = DATA.timesheet?.fullDayMin ?? 450, QUARTER = DATA.timesheet?.roundToMin ?? 15;
 let TT_FIT   = localStorage.getItem('tt_fit')==='1';
 let TT_ROUND = localStorage.getItem('tt_round')==='1';
 let TT_OMIT  = localStorage.getItem('tt_omit')==='1';   // drop "no jira" before fit/round
@@ -179,31 +225,140 @@ function resetToggles(){
 function refreshAll(){ renderAdjust(); renderWeek(); if(currentDay) openDay(currentDay); }
 // served over http:// by `timetrack --serve`? then the Regenerate button can re-grep
 const SERVED = location.protocol==='http:' || location.protocol==='https:';
+let SETUP_STATE = null;   // last /setup-status, for the toolbar button + muting
+function loadSetupState(){
+  if(!SERVED) return;
+  fetch('/setup-status').then(r=>r.json()).then(s=>{ SETUP_STATE=s; renderAdjust(); }).catch(()=>{});
+}
+// disable a button and show a spinner + label while an async action runs
+function busy(btn, label){ if(btn){ btn.disabled=true; btn.innerHTML=`<span class="spin"></span> ${label}`; } }
+function unbusy(btn, label){ if(btn){ btn.disabled=false; btn.textContent=label; } }
 function regenerate(){
   const b=document.getElementById('tRegen'); if(!b) return;
-  b.disabled=true; b.textContent='Regenerating…';
+  busy(b,'Regenerating…');
   fetch('/regenerate').then(r=>{ if(!r.ok) throw new Error('bad'); return r.json(); })
     .then(()=>location.reload())
-    .catch(()=>{ b.disabled=false; b.textContent='↻ Regenerate'; alert('Regenerate failed — is the server still running?'); });
+    .catch(()=>{ unbusy(b,'↻ Regenerate'); alert('Regenerate failed — is the server still running?'); });
 }
+const fitLabel = Math.floor(FULL_DAY/60)+':'+String(FULL_DAY%60).padStart(2,'0');
 function renderAdjust(){
   const el=document.getElementById('adjust'); if(!el) return;
   const pill=(on)=> on?'bg-blue-500 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10';
-  const note = TT_FIT ? 'scaled to 7:30 (meetings fixed)' : '';
-  const regen = SERVED
+  const note = TT_FIT ? `scaled to ${fitLabel} (meetings fixed)` : '';
+  const setupDone = SETUP_STATE && SETUP_STATE.focus.linked && SETUP_STATE.review.registered;
+  const setupBtn = setupDone
+    ? `<button id="tSetup" class="tab px-3 py-1 rounded-lg border bg-transparent border-white/5 text-slate-500 hover:bg-white/5" title="Integrations — all set up">✓ Setup</button>`
+    : `<button id="tSetup" class="tab px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300 hover:bg-white/10" title="Integrations status &amp; setup">🔌 Setup</button>`;
+  const right = SERVED
     ? `<span class="flex-1"></span>
+       ${setupBtn}
+       <button id="tSettings" class="tab px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300 hover:bg-white/10" title="Edit preferences">⚙ Settings</button>
        <button id="tRegen" class="tab px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300 hover:bg-white/10" title="Re-scan the signal sources">↻ Regenerate</button>`
     : `<span class="flex-1"></span>
-       <span class="text-slate-500">tip: run <span class="mono text-slate-400">timetrack --serve</span> to keep this tab live with a Regenerate button</span>`;
+       <span class="text-slate-500">tip: run <span class="mono text-slate-400">timetrack --serve</span> to keep this tab live with Setup, Settings &amp; Regenerate</span>`;
   el.innerHTML = `<span class="text-slate-400 mr-1 font-medium">Timesheet:</span>
     <button id="tOmit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_OMIT)}">Omit no-JIRA</button>
-    <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to 7:30</button>
-    <button id="tRound" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_ROUND)}">Round to 15m</button>
-    ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?' · 15-min chunks':''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">15-min chunks</span>`:'')}${regen}`;
+    <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to ${fitLabel}</button>
+    <button id="tRound" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_ROUND)}">Round to ${QUARTER}m</button>
+    ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?` · ${QUARTER}-min chunks`:''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">${QUARTER}-min chunks</span>`:'')}${right}`;
+  if(SERVED){ document.getElementById('tSetup').onclick=openSetup; document.getElementById('tSettings').onclick=openSettings; document.getElementById('tRegen').onclick=regenerate; }
   document.getElementById('tOmit').onclick=()=>{ TT_OMIT=!TT_OMIT; localStorage.setItem('tt_omit',TT_OMIT?'1':'0'); refreshAll(); };
   document.getElementById('tFit').onclick=()=>{ TT_FIT=!TT_FIT; localStorage.setItem('tt_fit',TT_FIT?'1':'0'); refreshAll(); };
   document.getElementById('tRound').onclick=()=>{ TT_ROUND=!TT_ROUND; localStorage.setItem('tt_round',TT_ROUND?'1':'0'); refreshAll(); };
-  if(SERVED) document.getElementById('tRegen').onclick=regenerate;
+}
+// ---------- Setup / integrations panel (serve mode) ----------
+function openSetup(){ document.getElementById('setup').classList.remove('hidden'); refreshSetup(); }
+function closeSetup(){ document.getElementById('setup').classList.add('hidden'); }
+function setupAgo(ep){
+  if(!ep) return 'never';
+  const s = Math.floor(Date.now()/1000) - ep;
+  if(s<90) return 'just now';
+  if(s<5400) return Math.round(s/60)+'m ago';
+  if(s<172800) return Math.round(s/3600)+'h ago';
+  return Math.round(s/86400)+'d ago';
+}
+function dot(state){ const c = state==='ok'?'#4ade80':(state==='warn'?'#fbbf24':'#64748b');
+  return `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c}"></span>`; }
+function refreshSetup(){
+  const b=document.getElementById('setupBody'); b.innerHTML='<div class="text-slate-400 text-sm py-4">checking…</div>';
+  fetch('/setup-status').then(r=>r.json()).then(s=>{ SETUP_STATE=s; b.innerHTML=setupHTML(s); wireSetup(); renderAdjust(); })
+    .catch(()=>{ b.innerHTML='<div class="text-rose-300 text-sm py-4">couldn’t reach the server</div>'; });
+}
+function setupHTML(s){
+  const f=s.focus, r=s.review;
+  const fState=f.running?'ok':(f.linked?'warn':'off');
+  const fMsg=f.running?'daemon running':(f.linked?'linked, not running yet':'not linked');
+  const rState=(r.registered&&r.lastTick)?'ok':(r.registered?'warn':'off');
+  const rMsg=r.registered?('host registered'+(r.browsers.length?' · '+r.browsers.join(', '):'')):'host not registered';
+  const fMuted = f.linked ? 'opacity-40' : '';      // installed → de-emphasise the how-to
+  const rMuted = r.registered ? 'opacity-40' : '';
+  return `
+   <section class="mb-5">
+     <div class="flex items-center gap-2 mb-0.5">${dot(fState)}<h3 class="font-semibold text-white">iTerm terminal focus</h3>${f.linked?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
+     <div class="text-xs text-slate-400 mb-2">${fMsg} · last tick ${setupAgo(f.lastTick)}</div>
+     <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${fMuted}">
+       <li>In iTerm <span class="text-slate-500">(GUI, one-time)</span>: Settings → General → Magic → enable <b>Python API</b>, then Scripts → Manage → <b>Install Python Runtime</b>.</li>
+       <li><button id="suFocus" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Link daemon into AutoLaunch</button></li>
+       <li>Start it: Scripts → AutoLaunch → <span class="mono">timetrack-focus.py</span> (or relaunch iTerm).</li>
+     </ol>
+   </section>
+   <section>
+     <div class="flex items-center gap-2 mb-0.5">${dot(rState)}<h3 class="font-semibold text-white">GitHub review extension</h3>${r.registered?'<span class="text-emerald-300 text-xs">✓ registered</span>':''}</div>
+     <div class="text-xs text-slate-400 mb-2">${rMsg} · last tick ${setupAgo(r.lastTick)}</div>
+     <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${rMuted}">
+       <li><span class="mono">chrome://extensions</span> <span class="text-slate-500">(GUI)</span> → Developer mode → Load unpacked → pick the <span class="mono">extension/</span> folder.</li>
+       <li>Copy its ID, paste it here and register the host:
+         <div class="flex gap-2 mt-1.5">
+           <input id="suExtId" placeholder="extension id (32 letters)" class="flex-1 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100 mono text-xs">
+           <button id="suHost" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Register host</button>
+         </div></li>
+       <li>Reload the extension, then click its toolbar icon once to test the bridge.</li>
+     </ol>
+     <div id="suMsg" class="text-xs mt-2"></div>
+   </section>
+   <div class="flex justify-end mt-4"><button onclick="refreshSetup()" class="text-xs px-3 py-1.5 rounded-lg text-slate-300 hover:bg-white/10">↻ Re-check</button></div>`;
+}
+function setupMsg(j){ const m=document.getElementById('suMsg'); if(!m) return;
+  m.className='text-xs mt-2 '+(j.ok?'text-emerald-300':'text-rose-300');
+  m.textContent=(j.ok?'✓ ':'✕ ')+((j.out||'').split('\n').pop()||''); }
+function wireSetup(){
+  const fb=document.getElementById('suFocus');
+  if(fb) fb.onclick=()=>{ busy(fb,'Linking…');
+    fetch('/setup/install-focus',{method:'POST'}).then(r=>r.json())
+      .then(j=>{ setupMsg(j); refreshSetup(); })
+      .catch(()=>{ unbusy(fb,'Link daemon into AutoLaunch'); setupMsg({ok:false,out:'request failed'}); }); };
+  const hb=document.getElementById('suHost');
+  if(hb) hb.onclick=()=>{ const id=document.getElementById('suExtId').value.trim();
+    if(!id){ setupMsg({ok:false,out:'paste the extension id first'}); return; }
+    busy(hb,'Registering…');
+    fetch('/setup/install-host',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})
+      .then(r=>r.json()).then(j=>{ setupMsg(j); refreshSetup(); })
+      .catch(()=>{ unbusy(hb,'Register host'); setupMsg({ok:false,out:'request failed'}); }); };
+}
+function openSettings(){
+  document.getElementById('cfgStart').value = fmt(FRAME.startMin);
+  document.getElementById('cfgEnd').value   = fmt(FRAME.endMin);
+  document.getElementById('cfgFull').value  = fmt(FULL_DAY);
+  document.getElementById('cfgIdle').value  = FRAME.idleTailMin;
+  document.getElementById('cfgRound').value = QUARTER;
+  document.getElementById('cfgWeeks').value = DATA.window?.weeks||4;
+  document.getElementById('settings').classList.remove('hidden');
+}
+function closeSettings(){ document.getElementById('settings').classList.add('hidden'); }
+function saveSettings(){
+  const b=document.getElementById('cfgSave'); busy(b,'Saving…');
+  const body={
+    day_start: document.getElementById('cfgStart').value,
+    day_end:   document.getElementById('cfgEnd').value,
+    full_day:  document.getElementById('cfgFull').value,
+    idle_tail_min: +document.getElementById('cfgIdle').value,
+    round_to_min:  +document.getElementById('cfgRound').value,
+    weeks:         +document.getElementById('cfgWeeks').value,
+  };
+  fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>{ if(!r.ok) throw new Error('bad'); return r.json(); })
+    .then(()=>location.reload())
+    .catch(()=>{ unbusy(b,'Save'); alert('Save failed — is the server still running?'); });
 }
 function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
@@ -535,11 +690,13 @@ function renderLegend(){
   wireHover();
 }
 
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeModal(); closeSettings(); closeSetup(); } });
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
+document.getElementById('settings').addEventListener('click',e=>{ if(e.target.id==='settings') closeSettings(); });
+document.getElementById('setup').addEventListener('click',e=>{ if(e.target.id==='setup') closeSetup(); });
 document.getElementById('sub').textContent =
   `${DATA.window?.weeks||'?'} weeks · ${DATA.events.length} signals · ${Object.keys(DATA.lanes).length} worktrees · ${DATA.tz||''} · built ${new Date(DATA.generatedAt).toLocaleString()}`;
-renderTabs(); renderAdjust(); applyBg(currentWeek); renderWeek(); renderLegend();
+renderTabs(); renderAdjust(); applyBg(currentWeek); renderWeek(); renderLegend(); loadSetupState();
 </script>
 </body>
 </html>

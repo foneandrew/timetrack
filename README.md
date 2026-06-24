@@ -20,7 +20,10 @@ Opening the built file as `file://` is fine, but to re-scan your signals without
 going back to the terminal, run a tiny local server instead. Served over
 `http://localhost`, the view grows a **Regenerate** button that re-greps the
 sources in place (and localStorage is rock-solid over a real origin, unlike
-`file://`).
+`file://`). It also gains a **⚙ Settings** panel (edit the preferences above) and
+a **🔌 Setup** panel — live status of the iTerm-focus and GitHub-review
+integrations, plus one-click buttons for the scriptable install steps (the
+iTerm/Chrome GUI steps still have to be done by hand, and are spelled out there).
 
 ```bash
 ./bin/timetrack --daemon   # serve in the background
@@ -94,6 +97,18 @@ calendar URL). Keys:
   `TZID=New Zealand Standard Time` are treated as local.
 - `skip_meetings` — title substrings that default to OFF.
 - `jira_names` — override the auto-derived JIRA names.
+
+Personal preferences (all optional — these are the defaults):
+- `day_start` / `day_end` — the framed working day (`"08:00"` / `"17:00"`).
+- `full_day` — the **Fit to** timesheet target (`"07:30"`).
+- `idle_tail_min` — how long your last signal of the day keeps holding (`30`).
+- `round_to_min` — the **Round to** granularity (`15`).
+- `weeks` — default number of weeks to scan when `-w` isn't given (`4`).
+
+In [serve mode](#serve-mode-live-regenerate-button) these last six are also
+editable from the **⚙ Settings** panel in the view — it writes them back to
+`config.json` (preserving everything else) and rebuilds. `-w` on the command
+line still overrides `weeks` for that run.
 
 ## GitHub review (browser extension)
 

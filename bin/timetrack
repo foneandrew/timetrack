@@ -47,7 +47,17 @@ DEFAULTS = {
     "ics_url": None,        # Outlook published calendar .ics (secret — keep out of git)
     "skip_meetings": [],    # meeting title substrings that default to OFF
     "jira_names": {},       # override derived names, e.g. {"PBL-7198": "EFS comparison"}
+    # personal preferences — editable in config.json or the served Settings panel
+    "day_start": "08:00",   # start of the framed working day
+    "day_end": "17:00",     # end of the framed working day
+    "full_day": "07:30",    # "Fit to" timesheet target
+    "idle_tail_min": 30,    # how long your last signal of the day keeps holding
+    "round_to_min": 15,     # "Round to" granularity
+    "weeks": 4,             # default number of weeks to scan when -w isn't given
 }
+
+# keys the served Settings panel is allowed to write back to config.json
+EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min", "weeks"}
 
 
 def load_config():
@@ -58,6 +68,15 @@ def load_config():
         except Exception as e:
             print(f"warning: could not read {CONFIG_PATH}: {e}", file=sys.stderr)
     return cfg
+
+
+def hhmm_to_min(value, default):
+    """'08:00' -> 480. Falls back to default on anything malformed."""
+    try:
+        h, m = str(value).split(":")
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return default
 
 
 def to_local(ts_str):
@@ -695,10 +714,16 @@ def build_weeks(start_date, today):
     return weeks
 
 
-def build_blob(weeks):
-    """Re-derive everything from the signal sources and return the data blob."""
+def build_blob(weeks=None):
+    """Re-derive everything from the signal sources and return the data blob.
+    weeks=None means "use the config default", so a Settings edit to it applies."""
     cfg = load_config()
     app_paths = cfg["app_paths"]
+    if weeks is None:
+        try:
+            weeks = int(cfg.get("weeks") or DEFAULTS["weeks"])
+        except (ValueError, TypeError):
+            weeks = DEFAULTS["weeks"]
     start_dt, end_dt, start_date, today = window_bounds(weeks)
 
     p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
@@ -719,7 +744,15 @@ def build_blob(weeks):
             "end": today.isoformat(),
             "weeks": weeks,
         },
-        "frame": {"startMin": 8 * 60, "endMin": 17 * 60, "idleTailMin": 30},
+        "frame": {
+            "startMin": hhmm_to_min(cfg.get("day_start"), 8 * 60),
+            "endMin": hhmm_to_min(cfg.get("day_end"), 17 * 60),
+            "idleTailMin": int(cfg.get("idle_tail_min") or DEFAULTS["idle_tail_min"]),
+        },
+        "timesheet": {
+            "fullDayMin": hhmm_to_min(cfg.get("full_day"), 450),
+            "roundToMin": int(cfg.get("round_to_min") or DEFAULTS["round_to_min"]),
+        },
         "lanes": lanes,
         "events": events,
         "jiraNames": build_jira_names(events, cfg.get("jira_names")),
@@ -730,12 +763,34 @@ def build_blob(weeks):
     }
 
 
+def update_config(updates):
+    """Merge whitelisted preference keys into config.json (preserving the rest).
+    Coerces the minute/week fields to int; ignores anything not editable."""
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            cfg = {}
+    for k, v in (updates or {}).items():
+        if k not in EDITABLE_KEYS:
+            continue
+        if k in ("idle_tail_min", "round_to_min", "weeks"):
+            try:
+                v = int(v)
+            except (ValueError, TypeError):
+                continue
+        cfg[k] = v
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    return cfg
+
+
 def render_html(blob):
     payload = "window.__TIMETRACK__ = " + json.dumps(blob) + ";"
     return TEMPLATE.read_text().replace("/*__TIMETRACK_DATA__*/", payload)
 
 
-def write_out(weeks):
+def write_out(weeks=None):
     """Build + render + write out/timetrack.html. Returns the blob."""
     blob = build_blob(weeks)
     OUT.parent.mkdir(parents=True, exist_ok=True)
@@ -783,6 +838,73 @@ def _open_browser(port):
     threading.Thread(target=go, daemon=True).start()
 
 
+ITERM_AUTOLAUNCH = (HOME / "Library" / "Application Support" / "iTerm2"
+                    / "Scripts" / "AutoLaunch" / "timetrack-focus.py")
+# Chromium-family app-support dirs the review host is registered into (mirrors
+# extension/install-host.sh), mapped to friendly names for the Setup panel.
+BROWSER_DIRS = [
+    ("Google/Chrome", "Chrome"),
+    ("Google/Chrome Canary", "Chrome Canary"),
+    ("Arc/User Data", "Arc"),
+    ("BraveSoftware/Brave-Browser", "Brave"),
+    ("Microsoft Edge", "Edge"),
+    ("Chromium", "Chromium"),
+]
+
+
+def _last_tick_epoch(logpath):
+    """Epoch of the most recent line in a tab-separated tick log, or None."""
+    if not logpath.exists():
+        return None
+    last = None
+    try:
+        for line in logpath.read_text(errors="replace").splitlines():
+            head = line.split("\t", 1)[0]
+            if head.isdigit():
+                last = int(head)
+    except OSError:
+        return None
+    return last
+
+
+def setup_status():
+    """Live state of the two integrations, for the served Setup panel."""
+    try:
+        running = subprocess.run(["pgrep", "-f", "timetrack-focus.py"],
+                                 capture_output=True).returncode == 0
+    except OSError:
+        running = False
+    browsers = [name for d, name in BROWSER_DIRS
+                if (HOME / "Library" / "Application Support" / d
+                    / "NativeMessagingHosts" / "com.timetrack.review.json").exists()]
+    return {
+        "focus": {"linked": ITERM_AUTOLAUNCH.exists(), "running": running,
+                  "lastTick": _last_tick_epoch(FOCUS_LOG)},
+        "review": {"registered": bool(browsers), "browsers": browsers,
+                   "lastTick": _last_tick_epoch(REVIEW_LOG)},
+    }
+
+
+def _run_installer(args):
+    """Run an install script and return {ok, out} (combined output, tail)."""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=30,
+                           cwd=str(Path(__file__).resolve().parent.parent))
+        return {"ok": r.returncode == 0, "out": (r.stdout + r.stderr).strip()[-1500:]}
+    except Exception as e:
+        return {"ok": False, "out": str(e)}
+
+
+def install_focus_daemon():
+    return _run_installer(["bash", str(Path(__file__).resolve().parent / "install-focus-daemon.sh")])
+
+
+def install_review_host(ext_id):
+    if not re.fullmatch(r"[a-p]{32}", ext_id or ""):
+        return {"ok": False, "out": "that doesn't look like a Chrome extension id (32 letters a–p)"}
+    return _run_installer(["bash", str(Path(__file__).resolve().parent.parent / "extension" / "install-host.sh"), ext_id])
+
+
 def _serve(weeks, port, open_browser=True):
     """Foreground HTTP server. GET / serves the last build; GET /regenerate
     re-greps the sources and rewrites it, for the in-page Regenerate button."""
@@ -819,6 +941,34 @@ def _serve(weeks, port, open_browser=True):
                 except Exception as e:
                     self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
                                "application/json")
+            elif path == "/setup-status":
+                self._send(200, json.dumps(setup_status()).encode(), "application/json")
+            else:
+                self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            path = self.path.split("?", 1)[0]
+            if path == "/config":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    updates = json.loads(self.rfile.read(n) or b"{}")
+                    update_config(updates)          # merge + write config.json
+                    blob = write_out(weeks)         # rebuild with the new settings
+                    self._send(200, json.dumps({"ok": True, "events": len(blob["events"])}).encode(),
+                               "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
+                               "application/json")
+            elif path == "/setup/install-focus":
+                self._send(200, json.dumps(install_focus_daemon()).encode(), "application/json")
+            elif path == "/setup/install-host":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    self._send(200, json.dumps(install_review_host(body.get("id", ""))).encode(),
+                               "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"ok": False, "out": str(e)}).encode(), "application/json")
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -847,10 +997,11 @@ def serve_start(weeks, port, daemon):
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     if daemon:
         logf = open(SERVE_LOG, "a")
+        cmd = [sys.executable, os.path.abspath(__file__), "--_serve-run", "--port", str(port)]
+        if weeks is not None:   # else the child stays config-driven, so Settings edits to it apply
+            cmd += ["--weeks", str(weeks)]
         proc = subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__),
-             "--_serve-run", "--weeks", str(weeks), "--port", str(port)],
-            stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, start_new_session=True,
+            cmd, stdout=logf, stderr=logf, stdin=subprocess.DEVNULL, start_new_session=True,
         )
         PID_FILE.write_text(f"{proc.pid} {port}\n")
         if _port_up(port):
@@ -901,8 +1052,8 @@ def serve_status():
 
 def main():
     ap = argparse.ArgumentParser(description="Build the timetrack visual.")
-    ap.add_argument("-w", "--weeks", type=int, default=4,
-                    help="number of weeks to scan, ending this week (default 4)")
+    ap.add_argument("-w", "--weeks", type=int, default=None,
+                    help="number of weeks to scan, ending this week (default: config `weeks`, or 4)")
     ap.add_argument("--json", action="store_true", help="print JSON to stdout, don't write HTML")
     ap.add_argument("--serve", action="store_true",
                     help="serve on http://localhost with a Regenerate button (foreground)")
