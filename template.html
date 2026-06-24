@@ -833,6 +833,7 @@ function saveSettings(){
 function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
 function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
+function nowMin(){ const d=new Date(); return d.getHours()*60+d.getMinutes(); }
 function fmt(min){ const h=Math.floor(min/60), m=Math.round(min%60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
 function dur(min){ const h=Math.floor(min/60), m=Math.round(min%60); return (h?h+'h ':'')+(m?m+'m':(h?'':'0m')); }
 function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':(t==='review'?'PR review':(t==='focus'?'terminal focus':t)))); }
@@ -1035,6 +1036,17 @@ function barHTML(m, segs, widthStyle, opts={}){
            ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:rgba(148,163,184,.85)">break</span>`:''}</div>`;
     }
   }
+  // today only (served): a clickable gap from the last signal to now — re-scans signals.
+  // only drawn when tall enough to fit its own label, per the "big enough" rule.
+  if(opts.live && opts.live.to>opts.live.from){
+    const lt=yFor(opts.live.from,m), lh=yFor(opts.live.to,m)-lt;
+    if(lh>=16){
+      h+=`<div onclick="event.stopPropagation(); regenerate()" title="catch up to now — re-scan the signal sources"
+           class="absolute rounded-[3px] cursor-pointer flex items-center justify-center"
+           style="top:${lt}px;height:${lh}px;left:3px;right:3px;z-index:7;background:rgba(96,165,250,.10);border:1px dashed rgba(96,165,250,.55)">
+           <span class="text-[9px] font-semibold leading-tight truncate px-1" style="color:rgba(147,197,253,.95)">↻ catch up</span></div>`;
+    }
+  }
   if(detail && opts.events){
     // passive, dense signals (iTerm focus + GitHub review) → thin red lines, behind
     for(const e of opts.events){
@@ -1084,7 +1096,12 @@ function renderWeek(){
   });
   const act = cells.filter(c=>c.has);
   const fStart = act.length?Math.min(...act.map(c=>c.fr.frameStart)):FRAME.startMin;
-  const fEnd   = act.length?Math.max(...act.map(c=>c.fr.frameEnd)):FRAME.endMin;
+  let   fEnd   = act.length?Math.max(...act.map(c=>c.fr.frameEnd)):FRAME.endMin;
+  // current week, served mode: stretch the axis to "now" so today's bar can show
+  // a clickable catch-up gap from the last signal down to the current time
+  const todayCell = cells.find(c=>c.d.isToday && c.m);
+  const liveTo = (SERVED && todayCell) ? nowMin() : null;
+  if(liveTo!=null) fEnd = Math.max(fEnd, liveTo);
   const shared = {frameStart:fStart, frameEnd:fEnd};
 
   // axis gets an invisible header matching the day-column header so the hour
@@ -1107,7 +1124,8 @@ function renderWeek(){
         ${sum?`<div class="text-[10px] text-slate-400 mt-0.5">${sum.things} item${sum.things===1?'':'s'}${sum.total?` · ${sum.attended}/${sum.total} mtgs`:''}</div>`:'<div class="text-[10px] text-slate-600 mt-0.5">·</div>'}
         ${holBadge}</div>`;
     if(c.has){
-      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(d.date)})}</div>`;
+      const live = (liveTo!=null && c.d.isToday && c.m) ? {from:c.m.activeEnd, to:liveTo} : null;
+      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(d.date), live})}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
       html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
         <div class="legitem text-[11px]" data-jira="${it.key}">
