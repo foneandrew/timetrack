@@ -555,6 +555,24 @@ function toggleMeeting(id){
   if(currentDay) openDay(currentDay);   // refresh modal
   renderWeek();                          // refresh week behind
 }
+// ---------- breaks (manual gaps you carve by hand, per-day, persisted) ----------
+// A break is "I wasn't working" — its span is removed from the model entirely
+// (task AND meeting time), so totals drop everywhere it counts. Recurring gaps
+// aren't a thing here: make a meeting for those.
+const BREAKCOL = '#64748b';
+const BREAKS = (()=>{ try { return JSON.parse(localStorage.getItem('tt_breaks')||'{}'); } catch(e){ return {}; } })();
+function saveBreaks(){ try { localStorage.setItem('tt_breaks', JSON.stringify(BREAKS)); } catch(e){} }
+function breaksForDay(date){ return BREAKS[date] || []; }   // unsorted — indices stay stable for editing
+function snap5(min){ return Math.round(min/5)*5; }
+function addBreak(date, startMin){
+  const s = Math.max(0, snap5(startMin));
+  (BREAKS[date] || (BREAKS[date]=[])).push({start:s, end:s+30});   // default 30 min
+  saveBreaks();
+}
+function updateBreak(date, idx, start, end){ const b=(BREAKS[date]||[])[idx]; if(b){ b.start=start; b.end=end; saveBreaks(); } }
+function deleteBreak(date, idx){ const l=BREAKS[date]; if(!l) return; l.splice(idx,1); if(!l.length) delete BREAKS[date]; saveBreaks(); }
+function clearBreaks(date){ delete BREAKS[date]; saveBreaks(); }
+
 // meetings win during their slot; task timeline underneath resumes after
 function overlay(baseSegs, date){
   let segs = baseSegs.map(s=>({...s}));
@@ -569,7 +587,38 @@ function overlay(baseSegs, date){
     out.push({start:mt.startMin,end:mt.endMin,meeting:true,title:mt.title,id:mt.id,jira:'__meeting__'});
     segs=out;
   }
+  // breaks win over everything (task AND meeting): carve their span out, insert nothing
+  for(const b of breaksForDay(date)){
+    const out=[];
+    for(const s of segs){
+      if(s.end<=b.start || s.start>=b.end){ out.push(s); continue; }
+      if(s.start<b.start) out.push({...s,end:b.start});
+      if(s.end>b.end)     out.push({...s,start:b.end});
+    }
+    segs=out;
+  }
   return segs.sort((a,b)=>a.start-b.start);
+}
+// resolved-view ONLY (display, never totals): coalesce abutting same-jira blocks
+// — e.g. one ticket worked across two worktrees — into a single seamless block.
+function mergeSameJira(segs){
+  const out=[];
+  for(const s of segs){
+    const last=out[out.length-1];
+    if(last && !last.meeting && !s.meeting && last.jira===s.jira && s.start<=last.end){
+      last.end=Math.max(last.end,s.end);
+      if(s.events) last.events=(last.events||[]).concat(s.events);
+    } else out.push({...s, events:(s.events?s.events.slice():s.events)});
+  }
+  for(const s of out){ if(s.events&&s.events.length){ s.events=s.events.slice().sort((a,b)=>a.minute-b.minute); s.init=s.events[0]; } }
+  return out;
+}
+// overlapping/stacked breaks collapse to one contiguous gap (display only)
+function mergedBreaks(date){
+  const list=breaksForDay(date).slice().sort((a,b)=>a.start-b.start), out=[];
+  for(const b of list){ const last=out[out.length-1];
+    if(last && b.start<=last.end) last.end=Math.max(last.end,b.end); else out.push({start:b.start,end:b.end}); }
+  return out;
 }
 function frameFor(date, base){
   let s = base?base.frameStart:FRAME.startMin, e = base?base.frameEnd:FRAME.endMin;
@@ -977,6 +1026,15 @@ function barHTML(m, segs, widthStyle, opts={}){
          style="top:${top}px;height:${height}px;left:3px;right:3px;background:${segColor};${stripe}">
          ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:${textCol}">${label}</span>`:''}</div>`;
   }
+  // breaks: a faint hatched ghost so a carved hole is never a mystery (purely visual)
+  if(opts.breaks){
+    for(const b of opts.breaks){
+      const top=yFor(b.start,m), height=Math.max(2,yFor(b.end,m)-top);
+      h+=`<div class="absolute rounded-[3px] pointer-events-none"
+           style="top:${top}px;height:${height}px;left:3px;right:3px;z-index:6;background-image:repeating-linear-gradient(45deg,rgba(148,163,184,.20) 0 5px,transparent 5px 10px);border:1px dashed rgba(148,163,184,.4)">
+           ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:rgba(148,163,184,.85)">break</span>`:''}</div>`;
+    }
+  }
   if(detail && opts.events){
     // passive, dense signals (iTerm focus + GitHub review) → thin red lines, behind
     for(const e of opts.events){
@@ -1049,7 +1107,7 @@ function renderWeek(){
         ${sum?`<div class="text-[10px] text-slate-400 mt-0.5">${sum.things} item${sum.things===1?'':'s'}${sum.total?` · ${sum.attended}/${sum.total} mtgs`:''}</div>`:'<div class="text-[10px] text-slate-600 mt-0.5">·</div>'}
         ${holBadge}</div>`;
     if(c.has){
-      html += `<div class="flex justify-center">${barHTML(shared, c.segs, 'width:100%')}</div>`;
+      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(d.date)})}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
       html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
         <div class="legitem text-[11px]" data-jira="${it.key}">
@@ -1100,6 +1158,54 @@ function meetingColHTML(date, mf){
   return h+`</div>`;
 }
 
+// ---------- breaks column (click empty to add · drag to move · drag bottom to resize) ----------
+function breakColHTML(date, mf){
+  let h=`<div id="breakCol" class="relative rounded-lg bg-[#252c3b] border border-white/10 overflow-hidden cursor-copy" style="height:${BAR_H}px;width:118px">`;
+  for(let hr=Math.ceil(mf.frameStart/60); hr*60<=mf.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,mf)}px"></div>`; }
+  breaksForDay(date).forEach((b,idx)=>{
+    const top=yFor(b.start,mf), height=Math.max(6,yFor(b.end,mf)-top);
+    h+=`<div class="brk absolute rounded-[3px] cursor-grab" data-bidx="${idx}"
+         style="top:${top}px;height:${height}px;left:3px;right:3px;background:${BREAKCOL};background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.18) 0 5px,transparent 5px 10px);touch-action:none">
+         <button class="brk-x absolute top-0 right-0 leading-none text-[11px] px-1 text-white/80 hover:text-white" title="delete break">✕</button>
+         ${height>16?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:rgba(255,255,255,.92)">break</span>`:''}
+         <div class="brk-handle" style="position:absolute;left:0;right:0;bottom:0;height:7px;cursor:ns-resize"></div></div>`;
+  });
+  return h+`</div>`;
+}
+function minFromY(el, clientY, mf){ const r=el.getBoundingClientRect(); return mf.frameStart + (clientY-r.top)/r.height*(mf.frameEnd-mf.frameStart); }
+function showBreakLabel(b,x,y){ tip.innerHTML=`<div class="font-semibold text-white">${fmt(b.start)} · ${dur(b.end-b.start)}</div>`; tip.style.opacity='1'; moveTip(x,y); }
+function redrawBreaks(date){ if(currentDay) openDay(currentDay); renderWeek(); }
+function beginBreakDrag(e, date, idx, mf, el, mode){
+  e.preventDefault(); e.stopPropagation();
+  const b=breaksForDay(date)[idx]; if(!b) return;
+  const startY=e.clientY, origStart=b.start, origEnd=b.end, len=origEnd-origStart, range=mf.frameEnd-mf.frameStart;
+  let cur={start:origStart,end:origEnd};
+  el.setPointerCapture(e.pointerId);
+  el.style.cursor = mode==='move'?'grabbing':'ns-resize';
+  const move=ev=>{
+    const dMin=(ev.clientY-startY)/BAR_H*range;
+    if(mode==='move'){ let s=snap5(origStart+dMin); s=Math.max(mf.frameStart, Math.min(s, mf.frameEnd-len)); cur={start:s, end:s+len}; }
+    else            { let en=snap5(origEnd+dMin); en=Math.max(origStart+5, Math.min(en, mf.frameEnd)); cur={start:origStart, end:en}; }
+    const top=yFor(cur.start,mf); el.style.top=top+'px'; el.style.height=Math.max(6,yFor(cur.end,mf)-top)+'px';
+    showBreakLabel(cur, ev.clientX, ev.clientY);
+  };
+  const up=()=>{ try{ el.releasePointerCapture(e.pointerId); }catch(_){}
+    el.removeEventListener('pointermove',move); el.removeEventListener('pointerup',up);
+    hideTip(); updateBreak(date, idx, cur.start, cur.end); redrawBreaks(date); };
+  el.addEventListener('pointermove',move); el.addEventListener('pointerup',up);
+}
+function wireBreaks(date, mf){
+  const col=document.getElementById('breakCol');
+  if(col) col.addEventListener('click', e=>{ if(e.target!==col) return; addBreak(date, minFromY(col, e.clientY, mf)); redrawBreaks(date); });
+  document.querySelectorAll('#breakCol .brk').forEach(el=>{
+    const idx=+el.dataset.bidx, x=el.querySelector('.brk-x'), handle=el.querySelector('.brk-handle');
+    x.addEventListener('click', ev=>{ ev.stopPropagation(); deleteBreak(date,idx); redrawBreaks(date); });
+    handle.addEventListener('pointerdown', ev=> beginBreakDrag(ev, date, idx, mf, el, 'resize'));
+    el.addEventListener('pointerdown', ev=>{ if(ev.target===handle || ev.target===x) return; beginBreakDrag(ev, date, idx, mf, el, 'move'); });
+  });
+  const cl=document.getElementById('brkClear'); if(cl) cl.onclick=()=>{ clearBreaks(date); redrawBreaks(date); };
+}
+
 function openDay(date){
   currentDay = date;
   const m = dayModel(date);
@@ -1115,10 +1221,13 @@ function openDay(date){
   const axisHead = `<div><div class="text-center text-[11px] font-semibold mb-1.5 invisible" aria-hidden="true">x</div>${hourAxis(mf,true)}</div>`;
   let cols = `<div class="flex gap-4 items-start">${axisHead}`;
   cols += `<div class="pl-1"><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
-           ${barHTML(mf,rsegs,'width:96px',{detail:true})}</div>`;
+           ${barHTML(mf,mergeSameJira(rsegs),'width:96px',{detail:true,breaks:mergedBreaks(date)})}</div>`;
   if(mtgs.length){
     cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${MEETING}">Meetings</div>${meetingColHTML(date,mf)}</div>`;
   }
+  cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${BREAKCOL}">Breaks</div>
+           ${breakColHTML(date,mf)}
+           ${breaksForDay(date).length?`<button id="brkClear" class="mt-1 w-full text-[10px] text-slate-500 hover:text-slate-300 underline">clear breaks</button>`:'<div class="mt-1 text-center text-[9px] text-slate-600">click to add</div>'}</div>`;
   const laneIds = m ? [...new Set(m.segs.map(s=>s.lane))].sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0)) : [];
   for(const id of laneIds){
     const segs=m.segs.filter(s=>s.lane===id);
@@ -1147,11 +1256,12 @@ function openDay(date){
   let chips=(revTot.length?label('Tasks'):'')+taskTot.map(chip).join('');
   if(revTot.length) chips+=label('Reviews')+revTot.map(chip).join('');
   let totHTML=`<div class="mt-5 pt-4 border-t border-white/10">
-    <div class="text-xs text-slate-400 mb-2">Rough breakdown · ${span} · <span style="display:inline-block;width:9px;height:7px;border-radius:3px 3px 3px 0;background:currentColor;vertical-align:middle"></span> prompt ◆ checkout · <span style="color:rgba(239,68,68,.85)">▬</span> focus/review · ▦ meeting (click to toggle)</div>
+    <div class="text-xs text-slate-400 mb-2">Rough breakdown · ${span} · <span style="display:inline-block;width:9px;height:7px;border-radius:3px 3px 3px 0;background:currentColor;vertical-align:middle"></span> prompt ◆ checkout · <span style="color:rgba(239,68,68,.85)">▬</span> focus/review · ▦ meeting (click to toggle) · <span style="color:${BREAKCOL}">▨</span> break (click empty in Breaks to add)</div>
     <div class="flex flex-wrap gap-2 items-center">${chips}`;
   body.innerHTML = cols + totHTML + `</div>`;
   modal.classList.remove('hidden');
   body.querySelectorAll('[data-mid]').forEach(el=> el.onclick = ()=> toggleMeeting(MIDX[+el.dataset.mid].id));
+  wireBreaks(date, mf);
   wireHover();
 }
 function closeModal(){ document.getElementById('modal').classList.add('hidden'); currentDay=null; }
