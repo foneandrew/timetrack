@@ -16,8 +16,12 @@ How it hangs together (same chain claude-tab-color walks):
   - So: focused session --(tty)--> Claude pid --> sessionId --> transcript -->
     latest cwd/branch --> a focus tick in ~/.timetrack/focus.log.
 
-It only ticks when iTerm2 is the frontmost app AND the focused tab has a Claude
-session on it — a plain shell tab, or iTerm2 in the background, ticks nothing.
+It ticks whenever iTerm2 is the frontmost app and the focused tab resolves to a
+git worktree. A Claude tab resolves via the chain above; a plain shell tab falls
+back to its own working directory (from iTerm2 shell integration) and is only
+counted if that directory is inside a git worktree — so reviewing commits in a
+bare terminal counts, but a tab parked in ~/ or /tmp ticks nothing. iTerm2 in the
+background ticks nothing either way.
 
 Cadence: it polls every POLL_INTERVAL but logs the same tab at most once per
 MIN_LOG_GAP (~30s). So a parked tab heartbeats every ~30s, while a *switch* to a
@@ -86,6 +90,23 @@ def _pid_tty(pid):
     except (subprocess.SubprocessError, OSError):
         return None
     return _tty_basename(out)
+
+
+def _worktree_branch(cwd):
+    """If cwd is inside a git worktree, return its branch name ('HEAD' when
+    detached); otherwise return False. The bool-vs-str result is the gate: a
+    plain shell tab only ticks when this returns a string, so directories that
+    aren't repos (~/, /tmp, …) are silently skipped."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if res.returncode != 0:
+        return False
+    return res.stdout.strip() or "HEAD"
 
 
 def _transcript_for_session(session_id):
@@ -164,18 +185,21 @@ def write_tick(cwd, branch):
 # Watching iTerm2 focus
 # ---------------------------------------------------------------------------
 
-async def _focused_tty(app):
-    """tty basename of the session in the current tab of the key window, or None."""
+async def _focused_session_info(app):
+    """(tty, cwd) for the session in the current tab of the key window. Either
+    field may be None. cwd comes from iTerm2 shell integration's `path`."""
     win = app.current_terminal_window
     if win is None:
-        return None
+        return None, None
     tab = win.current_tab
     if tab is None:
-        return None
+        return None, None
     session = tab.current_session
     if session is None:
-        return None
-    return _tty_basename(await session.async_get_variable("tty"))
+        return None, None
+    tty = _tty_basename(await session.async_get_variable("tty"))
+    path = await session.async_get_variable("path")
+    return tty, (path or None)
 
 
 async def watch_app_active(connection, state):
@@ -196,9 +220,15 @@ async def heartbeat(connection, state):
     last_time = 0.0
     while True:
         try:
-            tty = await _focused_tty(app) if state["active"] else None
+            tty, path = (await _focused_session_info(app)) if state["active"] else (None, None)
             if tty:
                 cwd, branch = build_tty_claude_map().get(tty, (None, None))
+                if not cwd and path:
+                    # No Claude session on this tab — fall back to the shell's own
+                    # cwd, but only count it when that cwd is a git worktree.
+                    wb = _worktree_branch(path)
+                    if wb is not False:
+                        cwd, branch = path, wb
                 if cwd:
                     now = time.time()
                     if tty != last_tty or (now - last_time) >= MIN_LOG_GAP:
