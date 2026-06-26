@@ -50,6 +50,7 @@ DEFAULTS = {
     "ics_url": None,        # Outlook published calendar .ics (secret — keep out of git)
     "skip_meetings": [],    # meeting title substrings that default to OFF
     "jira_names": {},       # override derived names, e.g. {"PBL-7198": "EFS comparison"}
+    "jira_codes": {},       # group JIRAs under a timesheet code, e.g. {"PBL-7198": "PLATFORM"}
     # personal preferences — editable in config.json or the served Settings panel
     "day_start": "08:00",   # start of the framed working day
     "day_end": "17:00",     # end of the framed working day
@@ -831,6 +832,7 @@ def build_blob(weeks=None):
         "lanes": lanes,
         "events": events,
         "jiraNames": build_jira_names(events, cfg.get("jira_names")),
+        "jiraCodes": cfg.get("jira_codes") or {},
         "reviewMeta": r_meta,
         "meetings": collect_meetings(cfg, start_date, today),
         "holidays": collect_holidays(cfg, start_date, today),
@@ -861,6 +863,40 @@ def update_config(updates):
         cfg[k] = v
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     return cfg
+
+
+def set_jira_code(jira, code):
+    """Persist one JIRA -> timesheet-code mapping in config.json. An empty code
+    unsets the mapping. Preserves the rest of the file."""
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            cfg = {}
+    codes = dict(cfg.get("jira_codes") or {})
+    code = (code or "").strip()
+    if code:
+        codes[jira] = code
+    else:
+        codes.pop(jira, None)
+    cfg["jira_codes"] = codes
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    return codes
+
+
+def remove_jira_code(code):
+    """Drop a whole timesheet code: unmap every JIRA currently pointing at it."""
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            cfg = {}
+    codes = {j: c for j, c in (cfg.get("jira_codes") or {}).items() if c != code}
+    cfg["jira_codes"] = codes
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    return codes
 
 
 def render_html(blob):
@@ -1034,6 +1070,26 @@ def _serve(weeks, port, open_browser=True):
                     blob = write_out(weeks)         # rebuild with the new settings
                     self._send(200, json.dumps({"ok": True, "events": len(blob["events"])}).encode(),
                                "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
+                               "application/json")
+            elif path == "/jira-code":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    set_jira_code(body.get("jira", ""), body.get("code", ""))
+                    write_out(weeks)            # re-bake so a hard refresh stays in sync
+                    self._send(200, json.dumps({"ok": True}).encode(), "application/json")
+                except Exception as e:
+                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
+                               "application/json")
+            elif path == "/remove-code":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    remove_jira_code(body.get("code", ""))
+                    write_out(weeks)
+                    self._send(200, json.dumps({"ok": True}).encode(), "application/json")
                 except Exception as e:
                     self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
                                "application/json")

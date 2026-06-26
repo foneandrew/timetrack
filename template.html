@@ -542,6 +542,18 @@ function colorFor(jira){
   return jiraColors[jira];
 }
 function nameFor(jira){ if(jira==='__meeting__') return 'meeting'; return jira ? (NAMES[jira] || '') : 'no jira'; }
+
+// ---------- timesheet codes (group JIRAs that book to the same code) ----------
+let CODES = DATA.jiraCodes || {};                          // jira -> code
+let TT_BYCODE = localStorage.getItem('tt_bycode')==='1';   // roll-up lens, persisted
+function codeOf(jira){ return jira ? (CODES[jira]||null) : null; }
+const codeColors={}; let codeIdx=0;
+// codes draw from the far end of the palette so they're less likely to collide with jira colours
+function codeColor(code){ if(!(code in codeColors)) codeColors[code]=PALETTE[PALETTE.length-1-(codeIdx++ % PALETTE.length)]; return codeColors[code]; }
+function grouped(jira){ return TT_BYCODE && !!codeOf(jira); }     // folded into a code under the active lens
+function groupKey(jira){ return grouped(jira) ? 'code:'+codeOf(jira) : keyOf(jira); }
+function effColor(jira){ return grouped(jira) ? codeColor(codeOf(jira)) : colorFor(jira); }
+function effLabel(jira){ return grouped(jira) ? codeOf(jira) : jira; }   // null -> caller falls back to lane
 function hexA(hex,a){ const n=parseInt(hex.slice(1),16); return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`; }
 
 // ---------- meetings (toggle state persisted in localStorage) ----------
@@ -605,7 +617,7 @@ function mergeSameJira(segs){
   const out=[];
   for(const s of segs){
     const last=out[out.length-1];
-    if(last && !last.meeting && !s.meeting && last.jira===s.jira && s.start<=last.end){
+    if(last && !last.meeting && !s.meeting && groupKey(last.jira)===groupKey(s.jira) && s.start<=last.end){
       last.end=Math.max(last.end,s.end);
       if(s.events) last.events=(last.events||[]).concat(s.events);
     } else out.push({...s, events:(s.events?s.events.slice():s.events)});
@@ -663,27 +675,35 @@ function applyAdjust(items){
 
 // timesheet rows for a day: each jira/no-jira + each attended meeting, with time
 function daySummary(date, segs){
-  const jt={}, worked=new Set();
-  for(const s of segs){ if(s.meeting) continue; const k=s.jira||'(no jira)'; jt[k]=(jt[k]||0)+(s.end-s.start);
-    if(s.lane!==REVIEW_LANE && s.jira) worked.add(s.jira); }
+  // group by the active lens: by code when grouping, else by jira
+  const grp={};   // groupKey -> {mins, jira(sample), code, worked}
+  for(const s of segs){ if(s.meeting) continue;
+    const gk=groupKey(s.jira);
+    const g=grp[gk] || (grp[gk]={mins:0, jira:s.jira, code:(grouped(s.jira)?codeOf(s.jira):null), worked:false});
+    g.mins+=(s.end-s.start);
+    if(s.lane!==REVIEW_LANE && s.jira) g.worked=true;
+  }
   const raw=[];
-  for(const k in jt){ const jira=k==='(no jira)'?null:k;
-    raw.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:jt[k],
-              reviewOnly: !!jira && !worked.has(jira)}); }
+  for(const gk in grp){ const g=grp[gk];
+    if(g.code) raw.push({key:gk, label:g.code, sub:'code', color:codeColor(g.code), mins:g.mins, reviewOnly:!g.worked});
+    else { const jira=g.jira;
+      raw.push({key:keyOf(jira), label:(jira||'no jira'), sub:(jira?nameFor(jira):''), color:colorFor(jira), mins:g.mins,
+                reviewOnly: !!jira && !g.worked}); }
+  }
   const mtgs=meetingsForDay(date);
   for(const mt of mtgs){ if(!isOn(mt)) continue;
     raw.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
   // drop "no jira" first, so Fit redistributes its time into the real jiras (still 7:30)
   const pool = TT_OMIT ? raw.filter(it=>it.key!=='__none__') : raw;
   const items = applyAdjust(pool);
-  return {items, things:Object.keys(jt).length, attended:mtgs.filter(isOn).length, total:mtgs.length,
+  return {items, things:Object.keys(grp).length, attended:mtgs.filter(isOn).length, total:mtgs.length,
           totalMins:items.reduce((s,i)=>s+i.mins,0)};
 }
 function resetToggles(){
   for(const k in MSTATE) delete MSTATE[k];
   saveMState(); renderWeek(); if(currentDay) openDay(currentDay);
 }
-function refreshAll(){ renderAdjust(); renderWeek(); if(currentDay) openDay(currentDay); }
+function refreshAll(){ renderAdjust(); renderWeek(); renderLegend(); if(currentDay) openDay(currentDay); }
 // served over http:// by `timetrack --serve`? then the Regenerate button can re-grep
 const SERVED = location.protocol==='http:' || location.protocol==='https:';
 let SETUP_STATE = null;   // last /setup-status, for the toolbar button + muting
@@ -721,11 +741,13 @@ function renderAdjust(){
     <button id="tOmit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_OMIT)}">Omit no-JIRA</button>
     <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to ${fitLabel}</button>
     <button id="tRound" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_ROUND)}">Round to ${QUARTER}m</button>
+    <button id="tCode" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_BYCODE)}" title="Roll JIRAs up into their timesheet codes">By timecode</button>
     ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?` · ${QUARTER}-min chunks`:''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">${QUARTER}-min chunks</span>`:'')}${right}`;
   if(SERVED){ document.getElementById('tSetup').onclick=openSetup; document.getElementById('tSettings').onclick=openSettings; document.getElementById('tRegen').onclick=regenerate; }
   document.getElementById('tOmit').onclick=()=>{ TT_OMIT=!TT_OMIT; localStorage.setItem('tt_omit',TT_OMIT?'1':'0'); refreshAll(); };
   document.getElementById('tFit').onclick=()=>{ TT_FIT=!TT_FIT; localStorage.setItem('tt_fit',TT_FIT?'1':'0'); refreshAll(); };
   document.getElementById('tRound').onclick=()=>{ TT_ROUND=!TT_ROUND; localStorage.setItem('tt_round',TT_ROUND?'1':'0'); refreshAll(); };
+  const tc=document.getElementById('tCode'); if(tc) tc.onclick=()=>{ TT_BYCODE=!TT_BYCODE; localStorage.setItem('tt_bycode',TT_BYCODE?'1':'0'); refreshAll(); };
 }
 // ---------- Setup / integrations panel (serve mode) ----------
 function openSetup(){ document.getElementById('setup').classList.remove('hidden'); refreshSetup(); }
@@ -1016,11 +1038,11 @@ function barHTML(m, segs, widthStyle, opts={}){
   for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`; }
   for(const s of segs){
     const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
-    const label = s.meeting ? s.title : (s.jira||laneShort(s.lane));
-    const segColor = s.meeting ? meetingColorFor(s.title) : colorFor(s.jira);
+    const label = s.meeting ? s.title : (effLabel(s.jira)||laneShort(s.lane));
+    const segColor = s.meeting ? meetingColorFor(s.title) : effColor(s.jira);
     const stripe = s.meeting ? 'background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);' : '';
     const textCol = s.meeting ? 'rgba(0,0,0,.72)' : textOn(s.jira);
-    let attrs = `data-jira="${keyOf(s.jira)}"`;
+    let attrs = `data-jira="${groupKey(s.jira)}"`;
     if(detail){ const idx=TIP.push(s)-1; attrs += ` data-tip="${idx}"`; }
     else { attrs += ` title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}"`; }
     h+=`<div class="seg absolute rounded-[3px]" ${attrs}
@@ -1256,20 +1278,32 @@ function openDay(date){
   }
   cols += `</div>`;
 
-  const rtot={};
-  for(const s of rsegs){ const k=s.meeting?'__meeting__':(s.jira||'(no jira)'); rtot[k]=(rtot[k]||0)+(s.end-s.start); }
-  const tot=Object.entries(rtot).sort((a,b)=>b[1]-a[1]);
-  // a real jira with no worktree/focus time that day is review-only (someone else's PR)
-  const worked=new Set();
-  for(const s of rsegs){ if(!s.meeting && s.lane!==REVIEW_LANE && s.jira) worked.add(s.jira); }
-  const isReview = j => j!=='__meeting__' && j!=='(no jira)' && !worked.has(j);
+  // group the resolved segs by the active lens (timesheet code or jira)
+  const grp={};   // gk -> {mins, jira, code, worked, meeting}
+  for(const s of rsegs){
+    const isM=s.meeting, gk=isM?'__meeting__':groupKey(s.jira);
+    const g=grp[gk] || (grp[gk]={mins:0, jira:isM?null:s.jira, code:(!isM&&grouped(s.jira))?codeOf(s.jira):null, worked:false, meeting:isM});
+    g.mins+=(s.end-s.start);
+    if(!isM && s.lane!==REVIEW_LANE && s.jira) g.worked=true;
+  }
+  const entries=Object.entries(grp).sort((a,b)=>b[1].mins-a[1].mins);
+  // review-only = no worktree/focus time that day (someone else's PR); a code is review-only if no member was worked
+  const isReviewG = g => !g.meeting && (g.code ? !g.worked : (!!g.jira && !g.worked));
   const span = rsegs.length ? `active ${dur(rsegs[rsegs.length-1].end-rsegs[0].start)} (${fmt(rsegs[0].start)}–${fmt(rsegs[rsegs.length-1].end)})` : '';
-  const chip = ([j,mins])=>{ const isM=j==='__meeting__'; const jira=isM?'__meeting__':(j==='(no jira)'?null:j);
-    return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="${keyOf(jira)}"${reviewPop(jira)}>
+  const chip = ([gk,g])=>{
+    if(g.meeting) return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="__meeting__">
+        <span class="w-2.5 h-2.5 rounded-sm" style="background:${MEETING}"></span><span class="font-medium">meetings</span>
+        <span class="mono text-slate-300">${dur(g.mins)}</span></div>`;
+    if(g.code) return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="${gk}">
+        <span class="w-2.5 h-2.5 rounded-sm" style="background:${codeColor(g.code)}"></span>
+        <span class="font-medium">${g.code}</span><span class="text-slate-400">code</span>
+        <span class="mono text-slate-300">${dur(g.mins)}</span></div>`;
+    const jira=g.jira, code=jira&&CODES[jira], tag=SERVED&&jira;
+    return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs ${tag?'cursor-pointer hover:bg-white/10':''}" data-jira="${keyOf(jira)}"${tag?` data-codejira="${jira}"`:''}${reviewPop(jira)}>
       <span class="w-2.5 h-2.5 rounded-sm" style="background:${colorFor(jira)}"></span>
-      <span class="font-medium">${isM?'meetings':(jira||'no jira')}</span>${(!isM&&nameFor(jira))?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}
-      <span class="mono text-slate-300">${dur(mins)}</span></div>`; };
-  const taskTot=tot.filter(([j])=>!isReview(j)), revTot=tot.filter(([j])=>isReview(j));
+      <span class="font-medium">${jira||'no jira'}</span>${(jira&&nameFor(jira))?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}${code?`<span class="text-[9px] px-1 rounded" style="background:${codeColor(code)};color:rgba(0,0,0,.72)">${code}</span>`:''}
+      <span class="mono text-slate-300">${dur(g.mins)}</span></div>`; };
+  const taskTot=entries.filter(([,g])=>!isReviewG(g)), revTot=entries.filter(([,g])=>isReviewG(g));
   const label=t=>`<div class="w-full text-[10px] uppercase tracking-wide text-slate-500 mt-1">${t}</div>`;
   let chips=(revTot.length?label('Tasks'):'')+taskTot.map(chip).join('');
   if(revTot.length) chips+=label('Reviews')+revTot.map(chip).join('');
@@ -1279,6 +1313,7 @@ function openDay(date){
   body.innerHTML = cols + totHTML + `</div>`;
   modal.classList.remove('hidden');
   body.querySelectorAll('[data-mid]').forEach(el=> el.onclick = ()=> toggleMeeting(MIDX[+el.dataset.mid].id));
+  if(SERVED) body.querySelectorAll('[data-codejira]').forEach(el=> el.addEventListener('click', e=>{ e.stopPropagation(); openCodeMenu(el.dataset.codejira, el); }));
   wireBreaks(date, mf);
   wireHover();
 }
@@ -1295,6 +1330,11 @@ function showTip(seg, x, y){
     if(seg.busy) line3 += ' · ' + seg.busy.toLowerCase();
     if('on' in seg) line3 += seg.on ? ' · included' : ' · excluded';
     line3 += '\n↪ click in the Meetings column to toggle';
+  } else if(grouped(seg.jira)){
+    const code=codeOf(seg.jira);
+    const members=[...new Set((seg.events||[]).map(e=>e.jira).filter(Boolean))];
+    head = `${code} · timecode`;
+    line3 = `${seg.events.length} event${seg.events.length===1?'':'s'}` + (members.length?`\n↪ ${members.join(', ')}`:'');
   } else {
     head = seg.jira ? `${seg.jira} · ${nameFor(seg.jira)}` : (nameFor(null)+' · '+laneShort(seg.lane));
     line3 = `${seg.events.length} event${seg.events.length===1?'':'s'} · ${laneShort(seg.lane)}`;
@@ -1372,9 +1412,10 @@ function renderLegend(){
   const taskJiras=jiras.filter(j=>!reviews.has(j));
   const sectioned=reviewJiras.length>0;
   const label=t=>`<span class="w-full text-[10px] uppercase tracking-wide text-slate-500">${t}</span>`;
-  const chip=j=>`<span class="legitem flex items-center gap-1.5" data-jira="${keyOf(j)}" style="color:${colorFor(j)}"${reviewPop(j)}>
+  const chip=j=>{ const c=CODES[j];
+    return `<span class="legitem flex items-center gap-1.5 ${SERVED?'cursor-pointer':''}" data-jira="${keyOf(j)}"${SERVED?` data-codejira="${j}"`:''}${reviewPop(j)} style="color:${colorFor(j)}">
       <span class="w-3 h-3 rounded-sm" style="background:${colorFor(j)}"></span>
-      <span class="font-semibold">${j}</span><span class="text-slate-400">${nameFor(j)}</span></span>`;
+      <span class="font-semibold">${j}</span><span class="text-slate-400">${nameFor(j)}</span>${c?`<span class="text-[9px] px-1 rounded" style="background:${codeColor(c)};color:rgba(0,0,0,.72)">${c}</span>`:''}</span>`; };
   let h = (sectioned ? label('Tasks') : '') + taskJiras.map(chip).join('');
   h += `<span class="legitem flex items-center gap-1.5" data-jira="__none__"><span class="w-3 h-3 rounded-sm" style="background:${NOJIRA}"></span><span class="text-slate-400">no jira</span></span>`;
   if((DATA.meetings||[]).length){
@@ -1384,13 +1425,65 @@ function renderLegend(){
   if(sectioned) h += label('Reviews') + reviewJiras.map(chip).join('');
   document.getElementById('legend').innerHTML = h;
   const rb=document.getElementById('resetMtg'); if(rb) rb.onclick=resetToggles;
+  if(SERVED) document.getElementById('legend').querySelectorAll('[data-codejira]').forEach(el=> el.addEventListener('click', e=>{ e.stopPropagation(); openCodeMenu(el.dataset.codejira, el); }));
   wireHover();
 }
+
+// ---------- timesheet-code assignment menu (serve mode: writes config.json) ----------
+function existingCodes(){ return [...new Set(Object.values(CODES))].filter(Boolean).sort(); }
+function assignCode(jira, code){
+  const prev = CODES[jira];
+  if(code) CODES[jira]=code; else delete CODES[jira];
+  refreshAll();
+  fetch('/jira-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jira, code:code||''})})
+    .then(r=>{ if(!r.ok) throw new Error('bad'); })
+    .catch(()=>{ if(prev) CODES[jira]=prev; else delete CODES[jira]; refreshAll(); alert('Saving code failed — is the server still running?'); });
+}
+function removeCode(code){
+  const prev={}; for(const j in CODES){ if(CODES[j]===code){ prev[j]=code; delete CODES[j]; } }
+  refreshAll();
+  fetch('/remove-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})})
+    .then(r=>{ if(!r.ok) throw new Error('bad'); })
+    .catch(()=>{ Object.assign(CODES, prev); refreshAll(); alert('Removing code failed — is the server still running?'); });
+}
+function closeCodeMenu(){ const m=document.getElementById('codeMenu'); if(m) m.remove(); }
+function openCodeMenu(jira, anchor){
+  closeCodeMenu();
+  const cur=CODES[jira]||'', codes=existingCodes();
+  const m=document.createElement('div');
+  m.id='codeMenu';
+  m.className='fixed z-50 bg-[#0c0e14] border border-white/15 rounded-lg shadow-xl p-2.5 text-xs';
+  m.style.minWidth='190px';
+  let html=`<div class="text-slate-400 mb-1.5">Timecode · <span class="text-slate-200 font-semibold">${jira}</span></div>`;
+  if(codes.length) html+=`<div class="flex flex-wrap gap-1 mb-1.5">`+codes.map(c=>`<span class="inline-flex items-center rounded border ${c===cur?'bg-blue-500 border-blue-400':'border-white/10'}">
+      <button data-code="${c}" class="pl-2 pr-1 py-0.5 ${c===cur?'text-white':'text-slate-300 hover:bg-white/10'}">${c}</button>
+      <button data-rmcode="${c}" title="remove this code from all tickets" class="px-1.5 py-0.5 leading-none border-l ${c===cur?'border-blue-300/40 text-blue-100 hover:text-white':'border-white/10 text-slate-500 hover:text-red-300'}">×</button></span>`).join('')+`</div>`;
+  html+=`<div class="flex gap-1"><input id="codeInput" placeholder="new code…" class="flex-1 min-w-0 bg-white/5 border border-white/10 rounded px-2 py-0.5 text-slate-100 outline-none focus:border-blue-400"><button id="codeAdd" class="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-slate-200">set</button></div>`;
+  if(cur) html+=`<button id="codeClear" class="mt-1.5 text-slate-500 hover:text-slate-300 underline">remove from ${cur}</button>`;
+  m.innerHTML=html;
+  document.body.appendChild(m);
+  const r=anchor.getBoundingClientRect();
+  m.style.left=Math.min(r.left, innerWidth-m.offsetWidth-8)+'px';
+  m.style.top=(Math.min(r.bottom+6, innerHeight-m.offsetHeight-8))+'px';
+  m.querySelectorAll('[data-code]').forEach(b=> b.onclick=()=>{ closeCodeMenu(); assignCode(jira, b.dataset.code); });
+  m.querySelectorAll('[data-rmcode]').forEach(b=> b.onclick=()=>{ closeCodeMenu(); removeCode(b.dataset.rmcode); });
+  const inp=m.querySelector('#codeInput'); inp.focus();
+  const add=()=>{ const v=inp.value.trim(); closeCodeMenu(); if(v) assignCode(jira, v); };
+  m.querySelector('#codeAdd').onclick=add;
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter') add(); else if(e.key==='Escape') closeCodeMenu(); });
+  const cl=m.querySelector('#codeClear'); if(cl) cl.onclick=()=>{ closeCodeMenu(); assignCode(jira,''); };
+}
+document.addEventListener('mousedown', e=>{ const m=document.getElementById('codeMenu'); if(m && !m.contains(e.target) && !e.target.closest('[data-codejira]')) closeCodeMenu(); }, true);
 
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeModal(); closeSettings(); closeSetup(); } });
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal') closeModal(); });
 document.getElementById('settings').addEventListener('click',e=>{ if(e.target.id==='settings') closeSettings(); });
 document.getElementById('setup').addEventListener('click',e=>{ if(e.target.id==='setup') closeSetup(); });
+// today's catch-up gap is measured against the wall clock, which only advances
+// between renders — so re-render the week whenever you return to the tab.
+function refreshLive(){ if(!document.hidden) renderWeek(); }
+window.addEventListener('focus', refreshLive);
+document.addEventListener('visibilitychange', refreshLive);
 document.getElementById('sub').textContent =
   `${DATA.window?.weeks||'?'} weeks · ${DATA.events.length} signals · ${Object.keys(DATA.lanes).length} worktrees · ${DATA.tz||''} · built ${new Date(DATA.generatedAt).toLocaleString()}`;
 renderTabs(); renderAdjust(); applyBg(currentWeek); renderWeek(); renderLegend(); loadSetupState(); applyEffect();
