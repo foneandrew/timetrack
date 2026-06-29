@@ -63,7 +63,7 @@ DEFAULTS = {
 
 # keys the served Settings panel is allowed to write back to config.json
 EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min",
-                 "weeks", "holiday_region"}
+                 "weeks", "holiday_region", "skip_meetings"}
 
 # NZ regions -> Nager.Date ISO-3166-2 county codes, for filtering provincial
 # anniversary days. National holidays (global) are always included.
@@ -860,6 +860,10 @@ def update_config(updates):
                 v = int(v)
             except (ValueError, TypeError):
                 continue
+        elif k == "skip_meetings":
+            if not isinstance(v, list):
+                continue
+            v = [s.strip() for s in v if isinstance(s, str) and s.strip()]
         cfg[k] = v
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     return cfg
