@@ -717,6 +717,16 @@ function loadSetupState(){
 // disable a button and show a spinner + label while an async action runs
 function busy(btn, label){ if(btn){ btn.disabled=true; btn.innerHTML=`<span class="spin"></span> ${label}`; } }
 function unbusy(btn, label){ if(btn){ btn.disabled=false; btn.textContent=label; } }
+// catch-up block was clicked: show a spinner in the block itself (the toolbar
+// Regenerate button is easy to miss) before kicking off the re-scan.
+function catchUp(el){
+  if(el){
+    el.onclick=null; el.style.cursor='default'; el.style.background='rgba(96,165,250,.18)';
+    el.innerHTML=`<span class="spin" style="border-color:rgba(147,197,253,.35);border-top-color:rgba(147,197,253,.95)"></span>
+      <span class="text-[9px] font-semibold leading-tight truncate px-1" style="color:rgba(147,197,253,.95)">catching up…</span>`;
+  }
+  regenerate();
+}
 function regenerate(){
   const b=document.getElementById('tRegen'); if(!b) return;
   busy(b,'Regenerating…');
@@ -745,12 +755,24 @@ function renderAdjust(){
     <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to ${fitLabel}</button>
     <button id="tRound" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_ROUND)}">Round to ${QUARTER}m</button>
     <button id="tCode" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_BYCODE)}" title="Roll JIRAs up into their timesheet codes">By timecode</button>
-    ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?` · ${QUARTER}-min chunks`:''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">${QUARTER}-min chunks</span>`:'')}${right}`;
+    ${note?`<span class="text-slate-400 ml-1">${note}${TT_ROUND?` · ${QUARTER}-min chunks`:''}</span>`:(TT_ROUND?`<span class="text-slate-400 ml-1">${QUARTER}-min chunks</span>`:'')}<span id="codeHint" class="hidden text-amber-300/90 text-xs ml-2"></span>${right}`;
   if(SERVED){ document.getElementById('tSetup').onclick=openSetup; document.getElementById('tSettings').onclick=openSettings; document.getElementById('tRegen').onclick=regenerate; }
   document.getElementById('tOmit').onclick=()=>{ TT_OMIT=!TT_OMIT; localStorage.setItem('tt_omit',TT_OMIT?'1':'0'); refreshAll(); };
   document.getElementById('tFit').onclick=()=>{ TT_FIT=!TT_FIT; localStorage.setItem('tt_fit',TT_FIT?'1':'0'); refreshAll(); };
   document.getElementById('tRound').onclick=()=>{ TT_ROUND=!TT_ROUND; localStorage.setItem('tt_round',TT_ROUND?'1':'0'); refreshAll(); };
-  const tc=document.getElementById('tCode'); if(tc) tc.onclick=()=>{ TT_BYCODE=!TT_BYCODE; localStorage.setItem('tt_bycode',TT_BYCODE?'1':'0'); refreshAll(); };
+  const tc=document.getElementById('tCode'); if(tc) tc.onclick=()=>{
+    if(!TT_BYCODE && existingCodes().length===0){ flashCodeHint(); return; }
+    TT_BYCODE=!TT_BYCODE; localStorage.setItem('tt_bycode',TT_BYCODE?'1':'0'); refreshAll();
+  };
+}
+function flashCodeHint(){
+  const h=document.getElementById('codeHint'); if(!h) return;
+  h.textContent = SERVED
+    ? 'No timecodes yet — click a ticket chip in the legend or a day’s breakdown to tag it with a code.'
+    : 'No timecodes yet — add them under "jira_codes" in config.json.';
+  h.classList.remove('hidden');
+  clearTimeout(flashCodeHint._t);
+  flashCodeHint._t = setTimeout(()=>{ const e=document.getElementById('codeHint'); if(e) e.classList.add('hidden'); }, 6000);
 }
 // ---------- Setup / integrations panel (serve mode) ----------
 function openSetup(){ document.getElementById('setup').classList.remove('hidden'); refreshSetup(); }
@@ -1068,7 +1090,7 @@ function barHTML(m, segs, widthStyle, opts={}){
   if(opts.live && opts.live.to>opts.live.from){
     const lt=yFor(opts.live.from,m), lh=yFor(opts.live.to,m)-lt;
     if(lh>=16){
-      h+=`<div onclick="event.stopPropagation(); regenerate()" title="catch up to now — re-scan the signal sources"
+      h+=`<div onclick="event.stopPropagation(); catchUp(this)" title="catch up to now — re-scan the signal sources"
            class="absolute rounded-[3px] cursor-pointer flex items-center justify-center"
            style="top:${lt}px;height:${lh}px;left:3px;right:3px;z-index:7;background:rgba(96,165,250,.10);border:1px dashed rgba(96,165,250,.55)">
            <span class="text-[9px] font-semibold leading-tight truncate px-1" style="color:rgba(147,197,253,.95)">↻ catch up</span></div>`;
