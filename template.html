@@ -547,9 +547,13 @@ function colorFor(jira){
 function nameFor(jira){ if(jira==='__meeting__') return 'meeting'; return jira ? (NAMES[jira] || '') : 'no jira'; }
 
 // ---------- timesheet codes (group JIRAs that book to the same code) ----------
-let CODES = DATA.jiraCodes || {};                          // jira -> code
+let CODES = DATA.jiraCodes || {};                          // real jira -> code (from config.json)
 let TT_BYCODE = localStorage.getItem('tt_bycode')==='1';   // roll-up lens, persisted
-function codeOf(jira){ return jira ? (CODES[jira]||null) : null; }
+// custom override names get their own code map, kept in localStorage — they're
+// window-scoped and ephemeral, so they never touch the committed-feel config.json.
+const CUSTOM_CODES = (()=>{ try { return JSON.parse(localStorage.getItem('tt_customcodes')||'{}'); } catch(e){ return {}; } })();
+function saveCustomCodes(){ try { localStorage.setItem('tt_customcodes', JSON.stringify(CUSTOM_CODES)); } catch(e){} }
+function codeOf(jira){ return jira ? (CODES[jira] || CUSTOM_CODES[jira] || null) : null; }
 const codeColors={}; let codeIdx=0;
 // codes draw from the far end of the palette so they're less likely to collide with jira colours
 function codeColor(code){ if(!(code in codeColors)) codeColors[code]=PALETTE[PALETTE.length-1-(codeIdx++ % PALETTE.length)]; return codeColors[code]; }
@@ -1115,11 +1119,11 @@ function barHTML(m, segs, widthStyle, opts={}){
   for(let hr=Math.ceil(m.frameStart/60); hr*60<=m.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,m)}px"></div>`; }
   for(const s of segs){
     const top=yFor(s.start,m), height=Math.max(2,yFor(s.end,m)-top);
-    const label = s.meeting ? s.title : (effLabel(s.jira)||laneShort(s.lane));
+    const label = esc(s.meeting ? s.title : (effLabel(s.jira)||laneShort(s.lane)));
     const segColor = s.meeting ? meetingColorFor(s.title) : effColor(s.jira);
     const stripe = s.meeting ? 'background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.20) 0 5px,transparent 5px 10px);' : '';
     const textCol = s.meeting ? 'rgba(0,0,0,.72)' : textOn(s.jira);
-    let attrs = `data-jira="${(s.fixed?'fix:':'')+groupKey(s.jira)}"`;
+    let attrs = `data-jira="${esc((s.fixed?'fix:':'')+groupKey(s.jira))}"`;
     if(detail){ const idx=TIP.push(s)-1; attrs += ` data-tip="${idx}"`; }
     else { attrs += ` title="${label} · ${fmt(s.start)}–${fmt(s.end)} · ${dur(s.end-s.start)}"`; }
     h+=`<div class="seg absolute rounded-[3px]" ${attrs}
@@ -1227,10 +1231,10 @@ function renderWeek(){
       html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(d.date), live})}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
       html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
-        <div class="legitem text-[11px]" data-jira="${it.key}">
+        <div class="legitem text-[11px]" data-jira="${esc(it.key)}">
           <div class="flex items-baseline gap-1.5">
             <span class="w-2.5 h-2.5 rounded-sm shrink-0 self-center" style="background:${it.color}"></span>
-            <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${it.label}${it.sub?(' — '+it.sub):''}${it.reviewOnly?' — code review':''}">${it.label}</span>
+            <span class="truncate flex-1 min-w-0 ${it.meeting?'text-slate-300':'text-slate-100'} font-medium" title="${esc(it.label)}${it.sub?(' — '+esc(it.sub)):''}${it.reviewOnly?' — code review':''}">${esc(it.label)}</span>
             ${it.reviewOnly?'<span class="text-[8px] uppercase tracking-wide px-1 rounded bg-white/15 text-slate-200 shrink-0">review</span>':''}
             <span class="mono font-bold text-white shrink-0 text-xs">${dur(it.mins)}</span>
           </div>
@@ -1384,14 +1388,14 @@ function openDay(date){
         <span class="w-2.5 h-2.5 rounded-sm" style="background:${MEETING}"></span><span class="font-medium">meetings</span>
         <span class="mono text-slate-300">${dur(g.mins)}</span></div>`;
     const fx = g.fixed?`<span class="text-[9px] px-1 rounded bg-white/10 text-amber-200" title="locked — Fit and Round leave this exact">fixed</span>`:'';
-    if(g.code) return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="${gk}">
+    if(g.code) return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs" data-jira="${esc(gk)}">
         <span class="w-2.5 h-2.5 rounded-sm" style="background:${codeColor(g.code)}"></span>
-        <span class="font-medium">${g.code}</span><span class="text-slate-400">code</span>${fx}
+        <span class="font-medium">${esc(g.code)}</span><span class="text-slate-400">code</span>${fx}
         <span class="mono text-slate-300">${dur(g.mins)}</span></div>`;
-    const jira=g.jira, code=jira&&CODES[jira], tag=SERVED&&jira&&!g.custom;
-    return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs ${tag?'cursor-pointer hover:bg-white/10':''}" data-jira="${gk}"${tag?` data-codejira="${jira}"`:''}${reviewPop(jira)}>
+    const jira=g.jira, code=jira&&codeOf(jira), tag=jira&&(g.custom||SERVED);   // custom names assign locally, so they're clickable even on file://
+    return `<div class="legitem flex items-center gap-1.5 bg-white/5 rounded-lg px-2.5 py-1 text-xs ${tag?'cursor-pointer hover:bg-white/10':''}" data-jira="${esc(gk)}"${tag?` data-codejira="${esc(jira)}" data-custom="${g.custom?'1':''}"`:''}${reviewPop(jira)}>
       <span class="w-2.5 h-2.5 rounded-sm" style="background:${colorFor(jira)}"></span>
-      <span class="font-medium">${jira||'no jira'}</span>${(jira&&nameFor(jira))?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}${code?`<span class="text-[9px] px-1 rounded" style="background:${codeColor(code)};color:rgba(0,0,0,.72)">${code}</span>`:''}${fx}
+      <span class="font-medium">${esc(jira||'no jira')}</span>${(jira&&nameFor(jira))?`<span class="text-slate-400">${nameFor(jira)}</span>`:''}${code?`<span class="text-[9px] px-1 rounded" style="background:${codeColor(code)};color:rgba(0,0,0,.72)">${code}</span>`:''}${fx}
       <span class="mono text-slate-300">${dur(g.mins)}</span></div>`; };
   const taskTot=entries.filter(([,g])=>!isReviewG(g)), revTot=entries.filter(([,g])=>isReviewG(g));
   const label=t=>`<div class="w-full text-[10px] uppercase tracking-wide text-slate-500 mt-1">${t}</div>`;
@@ -1403,7 +1407,7 @@ function openDay(date){
   body.innerHTML = cols + totHTML + `</div>`;
   modal.classList.remove('hidden');
   body.querySelectorAll('[data-mid]').forEach(el=> el.onclick = ()=> toggleMeeting(MIDX[+el.dataset.mid].id));
-  if(SERVED) body.querySelectorAll('[data-codejira]').forEach(el=> el.addEventListener('click', e=>{ e.stopPropagation(); openCodeMenu(el.dataset.codejira, el); }));
+  body.querySelectorAll('[data-codejira]').forEach(el=> el.addEventListener('click', e=>{ e.stopPropagation(); openCodeMenu(el.dataset.codejira, el, el.dataset.custom==='1'); }));
   wireOverrides(date, mf);
   wireHover();
 }
@@ -1519,9 +1523,14 @@ function renderLegend(){
   wireHover();
 }
 
-// ---------- timesheet-code assignment menu (serve mode: writes config.json) ----------
-function existingCodes(){ return [...new Set(Object.values(CODES))].filter(Boolean).sort(); }
-function assignCode(jira, code){
+// ---------- timesheet-code assignment menu (real jiras write config.json; custom names stay local) ----------
+function existingCodes(){ return [...new Set([...Object.values(CODES), ...Object.values(CUSTOM_CODES)])].filter(Boolean).sort(); }
+function assignCode(jira, code, isCustom){
+  if(isCustom){   // a custom override name — local-only, no server round-trip
+    if(code) CUSTOM_CODES[jira]=code; else delete CUSTOM_CODES[jira];
+    saveCustomCodes(); refreshAll();
+    return;
+  }
   const prev = CODES[jira];
   if(code) CODES[jira]=code; else delete CODES[jira];
   refreshAll();
@@ -1531,20 +1540,23 @@ function assignCode(jira, code){
 }
 function removeCode(code){
   const prev={}; for(const j in CODES){ if(CODES[j]===code){ prev[j]=code; delete CODES[j]; } }
+  const prevC={}; for(const j in CUSTOM_CODES){ if(CUSTOM_CODES[j]===code){ prevC[j]=code; delete CUSTOM_CODES[j]; } }
+  if(Object.keys(prevC).length) saveCustomCodes();
   refreshAll();
+  if(!Object.keys(prev).length) return;   // custom-only code: nothing to persist server-side
   fetch('/remove-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})})
     .then(r=>{ if(!r.ok) throw new Error('bad'); })
     .catch(()=>{ Object.assign(CODES, prev); refreshAll(); alert('Removing code failed — is the server still running?'); });
 }
 function closeCodeMenu(){ const m=document.getElementById('codeMenu'); if(m) m.remove(); }
-function openCodeMenu(jira, anchor){
+function openCodeMenu(jira, anchor, isCustom){
   closeCodeMenu();
-  const cur=CODES[jira]||'', codes=existingCodes();
+  const cur=codeOf(jira)||'', codes=existingCodes();
   const m=document.createElement('div');
   m.id='codeMenu';
   m.className='fixed z-50 bg-[#0c0e14] border border-white/15 rounded-lg shadow-xl p-2.5 text-xs';
   m.style.minWidth='190px';
-  let html=`<div class="text-slate-400 mb-1.5">Timecode · <span class="text-slate-200 font-semibold">${jira}</span></div>`;
+  let html=`<div class="text-slate-400 mb-1.5">Timecode · <span class="text-slate-200 font-semibold">${esc(jira)}</span>${isCustom?' <span class="text-[10px] text-slate-500">· custom, saved locally</span>':''}</div>`;
   if(codes.length) html+=`<div class="flex flex-wrap gap-1 mb-1.5">`+codes.map(c=>`<span class="inline-flex items-center rounded border ${c===cur?'bg-blue-500 border-blue-400':'border-white/10'}">
       <button data-code="${c}" class="pl-2 pr-1 py-0.5 ${c===cur?'text-white':'text-slate-300 hover:bg-white/10'}">${c}</button>
       <button data-rmcode="${c}" title="remove this code from all tickets" class="px-1.5 py-0.5 leading-none border-l ${c===cur?'border-blue-300/40 text-blue-100 hover:text-white':'border-white/10 text-slate-500 hover:text-red-300'}">×</button></span>`).join('')+`</div>`;
@@ -1555,13 +1567,13 @@ function openCodeMenu(jira, anchor){
   const r=anchor.getBoundingClientRect();
   m.style.left=Math.min(r.left, innerWidth-m.offsetWidth-8)+'px';
   m.style.top=(Math.min(r.bottom+6, innerHeight-m.offsetHeight-8))+'px';
-  m.querySelectorAll('[data-code]').forEach(b=> b.onclick=()=>{ closeCodeMenu(); assignCode(jira, b.dataset.code); });
+  m.querySelectorAll('[data-code]').forEach(b=> b.onclick=()=>{ closeCodeMenu(); assignCode(jira, b.dataset.code, isCustom); });
   m.querySelectorAll('[data-rmcode]').forEach(b=> b.onclick=()=>{ closeCodeMenu(); removeCode(b.dataset.rmcode); });
   const inp=m.querySelector('#codeInput'); inp.focus();
-  const add=()=>{ const v=inp.value.trim(); closeCodeMenu(); if(v) assignCode(jira, v); };
+  const add=()=>{ const v=inp.value.trim(); closeCodeMenu(); if(v) assignCode(jira, v, isCustom); };
   m.querySelector('#codeAdd').onclick=add;
   inp.addEventListener('keydown',e=>{ if(e.key==='Enter') add(); else if(e.key==='Escape') closeCodeMenu(); });
-  const cl=m.querySelector('#codeClear'); if(cl) cl.onclick=()=>{ closeCodeMenu(); assignCode(jira,''); };
+  const cl=m.querySelector('#codeClear'); if(cl) cl.onclick=()=>{ closeCodeMenu(); assignCode(jira,'', isCustom); };
 }
 document.addEventListener('mousedown', e=>{ const m=document.getElementById('codeMenu'); if(m && !m.contains(e.target) && !e.target.closest('[data-codejira]')) closeCodeMenu(); }, true);
 
