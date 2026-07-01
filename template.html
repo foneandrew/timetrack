@@ -803,7 +803,7 @@ function renderAdjust(){
        <button id="tSettings" class="tab px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300 hover:bg-white/10" title="Edit preferences">⚙ Settings</button>
        <button id="tRegen" class="tab px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300 hover:bg-white/10" title="Re-scan the signal sources">↻ Regenerate</button>`
     : `<span class="flex-1"></span>
-       <span class="text-slate-500">tip: run <span class="mono text-slate-400">timetrack --serve</span> to keep this tab live with Setup, Settings &amp; Regenerate</span>`;
+       <span class="px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300">tip: run <span class="mono text-slate-100">timetrack --serve</span> to keep this tab live with Setup, Settings &amp; Regenerate</span>`;
   el.innerHTML = `<span class="text-slate-400 mr-1 font-medium">Timesheet:</span>
     <button id="tOmit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_OMIT)}">Omit no-JIRA</button>
     <button id="tFit" class="tab px-3 py-1 rounded-lg border font-medium ${pill(TT_FIT)}">Fit to ${fitLabel}</button>
@@ -937,6 +937,7 @@ function keyOf(jira){ return jira || '__none__'; }
 function laneShort(id){ const l=DATA.lanes[id]; return l?l.label:id.split('/').slice(-1)[0]; }
 function textOn(jira){ return jira ? 'rgba(0,0,0,.72)' : 'rgba(255,255,255,.78)'; }
 function nowMin(){ const d=new Date(); return d.getHours()*60+d.getMinutes(); }
+function todayISO(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function fmt(min){ const h=Math.floor(min/60), m=Math.round(min%60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
 function dur(min){ const h=Math.floor(min/60), m=Math.round(min%60); return (h?h+'h ':'')+(m?m+'m':(h?'':'0m')); }
 function typeLabel(t){ return t==='prompt'?'prompt':(t==='gcod'?'gcod checkout':(t==='gco'?'gco checkout':(t==='review'?'PR review':(t==='focus'?'terminal focus':t)))); }
@@ -1201,11 +1202,18 @@ function renderWeek(){
   const fStart = act.length?Math.min(...act.map(c=>c.fr.frameStart)):FRAME.startMin;
   let   fEnd   = act.length?Math.max(...act.map(c=>c.fr.frameEnd)):FRAME.endMin;
   // current week, served mode: stretch the axis to "now" so today's bar can show
-  // a clickable catch-up gap from the last signal down to the current time
-  const todayCell = cells.find(c=>c.d.isToday && c.m);
-  const liveTo = (SERVED && todayCell) ? nowMin() : null;
+  // a clickable catch-up gap from the last signal down to the current time.
+  // If the page is stale (built on an earlier day than the real one), the build
+  // day's gap runs to midnight instead of wrapping past it, and every day since
+  // — including the real today, which the build never scanned — gets its own
+  // catch-up block, since none of them carry any frozen event data.
+  const REAL_TODAY = SERVED ? todayISO() : null;
+  const BUILD_TODAY = DATA.window?.end;
+  const buildCell = (REAL_TODAY && BUILD_TODAY) ? cells.find(c=>c.d.date===BUILD_TODAY && c.m) : null;
+  const liveTo = buildCell ? (REAL_TODAY===BUILD_TODAY ? nowMin() : 1440) : null;
   if(liveTo!=null) fEnd = Math.max(fEnd, liveTo);
   const shared = {frameStart:fStart, frameEnd:fEnd};
+  const isMissingDay = d => !!(REAL_TODAY && BUILD_TODAY && REAL_TODAY>BUILD_TODAY && d.date>BUILD_TODAY && d.date<=REAL_TODAY);
 
   // axis gets an invisible header matching the day-column header so the hour
   // lines align with the bars, not the column tops
@@ -1220,14 +1228,15 @@ function renderWeek(){
         title="${hol}${worked?' — marked as worked, click to restore the day off':' — click if you actually worked this day'}"
         class="mt-0.5 text-[10px] flex items-center justify-center gap-1 cursor-pointer ${worked?'opacity-40 line-through':'text-amber-200'}">
         <span>${theme.icon}</span><span class="truncate">${hol}</span></div>` : '';
-    html += `<div class="daycol flex-1 min-w-0 rounded-xl p-2 cursor-pointer ${d.isToday?'ring-1 ring-blue-400/50':''} ${festive?'bg-amber-400/5':''}" onclick="openDay('${d.date}')">
+    const isNowToday = REAL_TODAY ? d.date===REAL_TODAY : d.isToday;
+    html += `<div class="daycol flex-1 min-w-0 rounded-xl p-2 cursor-pointer ${isNowToday?'ring-1 ring-blue-400/50':''} ${festive?'bg-amber-400/5':''}" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
-        <div class="text-xs font-semibold ${d.isToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
+        <div class="text-xs font-semibold ${isNowToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
         <div class="text-[10px] text-slate-400 mono">${d.short.replace(/^\w+\s/,'')}</div>
         ${sum?`<div class="text-[10px] text-slate-400 mt-0.5">${sum.things} item${sum.things===1?'':'s'}${sum.total?` · ${sum.attended}/${sum.total} mtgs`:''}</div>`:'<div class="text-[10px] text-slate-600 mt-0.5">·</div>'}
         ${holBadge}</div>`;
     if(c.has){
-      const live = (liveTo!=null && c.d.isToday && c.m) ? {from:c.m.activeEnd, to:liveTo} : null;
+      const live = (liveTo!=null && d.date===BUILD_TODAY && c.m) ? {from:c.m.activeEnd, to:liveTo} : null;
       html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(d.date), live})}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
       html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
@@ -1247,6 +1256,12 @@ function renderWeek(){
                  <div class="text-[10px] text-slate-500">day off</div>
                  <button onclick="event.stopPropagation(); toggleWorked('${d.date}')" class="mt-1 text-[9px] px-2 py-0.5 rounded border border-white/10 text-slate-400 hover:bg-white/10">I worked this day</button>
                </div>
+               <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
+    } else if(isMissingDay(d)){
+      html += `<div onclick="event.stopPropagation(); catchUp(this)" title="catch up to now — re-scan the signal sources"
+                 class="rounded-lg cursor-pointer flex items-center justify-center"
+                 style="height:${BAR_H}px;background:rgba(96,165,250,.10);border:1px dashed rgba(96,165,250,.55)">
+                 <span class="text-[10px] font-semibold" style="color:rgba(147,197,253,.95)">↻ catch up</span></div>
                <div class="text-center text-[10px] text-slate-600 mono mt-1.5">·</div>`;
     } else {
       html += `<div class="rounded-lg bg-[#252c3b] border border-dashed border-white/10 flex items-center justify-center text-slate-600 text-[10px]" style="height:${BAR_H}px">—</div>
