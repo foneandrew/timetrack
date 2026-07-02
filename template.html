@@ -587,10 +587,20 @@ const BREAKCOL = '#64748b';
 const OVERRIDES = (()=>{
   try {
     const cur = localStorage.getItem('tt_overrides');
-    if(cur) return JSON.parse(cur);
-    const old = JSON.parse(localStorage.getItem('tt_breaks')||'{}');
-    for(const d in old) old[d] = (old[d]||[]).map(b=>({type:'break', start:b.start, end:b.end}));
-    return old;
+    let out;
+    if(cur) out = JSON.parse(cur);
+    else {
+      const old = JSON.parse(localStorage.getItem('tt_breaks')||'{}');
+      for(const d in old) old[d] = (old[d]||[]).map(b=>({type:'break', start:b.start, end:b.end}));
+      out = old;
+    }
+    // `added` breaks ties when two overrides are pixel-for-pixel identical (see
+    // overridePriority). Entries from before this field existed get one backfilled
+    // from their array position, so the old implicit "last in the array wins" order
+    // is preserved for pre-existing data instead of colliding all at 0.
+    let seq=0;
+    for(const d in out) for(const o of out[d]) if(o.added==null) o.added=++seq;
+    return out;
   } catch(e){ return {}; }
 })();
 function saveOverrides(){ try { localStorage.setItem('tt_overrides', JSON.stringify(OVERRIDES)); } catch(e){} }
@@ -598,7 +608,7 @@ function overridesForDay(date){ return OVERRIDES[date] || []; }   // unsorted �
 function snap5(min){ return Math.round(min/5)*5; }
 function addOverride(date, startMin){
   const s = Math.max(0, snap5(startMin));
-  (OVERRIDES[date] || (OVERRIDES[date]=[])).push({type:'break', start:s, end:s+30});   // default 30 min
+  (OVERRIDES[date] || (OVERRIDES[date]=[])).push({type:'break', start:s, end:s+30, added:Date.now()});   // default 30 min
   saveOverrides();
 }
 function updateOverride(date, idx, start, end){ const b=(OVERRIDES[date]||[])[idx]; if(b){ b.start=start; b.end=end; saveOverrides(); } }
@@ -627,6 +637,14 @@ function ticketsThisWeek(date){
   return [...set].sort();
 }
 
+// Deterministic overlap order for overrides that step on each other: a later
+// start wins (it's processed last, carving on top); tied starts, the shorter
+// one wins; a pixel-for-pixel tie falls back to whichever was added last. This
+// is applied by sorting lowest-priority-first, so the loop in overlay() below
+// naturally carves the highest-priority override on last, leaving it "on top".
+function overridePriority(list){
+  return list.slice().sort((a,b)=> (a.start-b.start) || ((b.end-b.start)-(a.end-a.start)) || ((a.added||0)-(b.added||0)));
+}
 // meetings win during their slot; task timeline underneath resumes after
 function overlay(baseSegs, date){
   let segs = baseSegs.map(s=>({...s}));
@@ -641,10 +659,13 @@ function overlay(baseSegs, date){
     out.push({start:mt.startMin,end:mt.endMin,meeting:true,title:mt.title,id:mt.id,jira:'__meeting__'});
     segs=out;
   }
-  // overrides overrule everything underneath (task AND meeting) for their span: a
-  // break carves and inserts nothing; a task/fixed carves and drops in a relabel
-  // seg keyed by its target (a real ticket id, or a custom name used as identity).
-  for(const o of overridesForDay(date)){
+  // overrides overrule everything underneath (task AND meeting) for their span, in
+  // overridePriority order so a higher-priority override carves on top of a lower
+  // one it overlaps: a break carves and leaves a `breakGhost` marker (so a later,
+  // higher-priority override can still reclaim part of it — see mergedBreaks);
+  // a task/fixed carves and drops in a relabel seg keyed by its target (a real
+  // ticket id, or a custom name used as identity).
+  for(const o of overridePriority(overridesForDay(date))){
     const out=[];
     for(const s of segs){
       if(s.end<=o.start || s.start>=o.end){ out.push(s); continue; }
@@ -652,7 +673,9 @@ function overlay(baseSegs, date){
       if(s.end>o.end)     out.push({...s,start:o.end});
     }
     const ident = o.jira || o.label;
-    if(o.type!=='break' && ident){
+    if(o.type==='break'){
+      out.push({start:o.start, end:o.end, breakGhost:true});
+    } else if(ident){
       out.push({start:o.start, end:o.end, jira:ident, lane:'__override__',
                 override:true, fixed:o.type==='fixed', custom:!o.jira});
     }
@@ -662,9 +685,11 @@ function overlay(baseSegs, date){
 }
 // resolved-view ONLY (display, never totals): coalesce abutting same-jira blocks
 // — e.g. one ticket worked across two worktrees — into a single seamless block.
+// Break ghosts (see overlay) are dropped here; they surface only via mergedBreaks.
 function mergeSameJira(segs){
   const out=[];
   for(const s of segs){
+    if(s.breakGhost) continue;
     const last=out[out.length-1];
     if(last && !last.meeting && !s.meeting && groupKey(last.jira)===groupKey(s.jira) && s.start<=last.end){
       last.end=Math.max(last.end,s.end);
@@ -674,9 +699,11 @@ function mergeSameJira(segs){
   for(const s of out){ if(s.events&&s.events.length){ s.events=s.events.slice().sort((a,b)=>a.minute-b.minute); s.init=s.events[0]; } }
   return out;
 }
-// overlapping/stacked breaks collapse to one contiguous gap (display only)
-function mergedBreaks(date){
-  const list=overridesForDay(date).filter(o=>o.type==='break').sort((a,b)=>a.start-b.start), out=[];
+// still-blank spans left behind by breaks once every higher-priority override has
+// had its chance to reclaim part of them (see overlay) — merged into contiguous
+// ranges for a tidy hatch (display only, never totals).
+function mergedBreaks(resolvedSegs){
+  const list=resolvedSegs.filter(s=>s.breakGhost).sort((a,b)=>a.start-b.start), out=[];
   for(const b of list){ const last=out[out.length-1];
     if(last && b.start<=last.end) last.end=Math.max(last.end,b.end); else out.push({start:b.start,end:b.end}); }
   return out;
@@ -734,7 +761,7 @@ function applyAdjust(items){
 function daySummary(date, segs){
   // group by the active lens: by code when grouping, else by jira
   const grp={};   // groupKey -> {mins, jira(sample), code, worked, fixed}
-  for(const s of segs){ if(s.meeting) continue;
+  for(const s of segs){ if(s.meeting || s.breakGhost) continue;
     const gk=(s.fixed?'fix:':'')+groupKey(s.jira);   // fixed stands apart so its locked time never merges with flexible work
     const g=grp[gk] || (grp[gk]={mins:0, jira:s.jira, code:(grouped(s.jira)?codeOf(s.jira):null), worked:false, fixed:!!s.fixed, custom:!!s.custom});
     g.mins+=(s.end-s.start);
@@ -748,8 +775,14 @@ function daySummary(date, segs){
                 reviewOnly: !!jira && !g.worked, fixed:g.fixed}); }
   }
   const mtgs=meetingsForDay(date);
+  // each meeting's *surviving* span in `segs`, not its raw duration — an override
+  // carving into (or fully over) a meeting shrinks or drops its time here too,
+  // not just in the bar you're looking at.
+  const mtgMins={};
+  for(const s of segs){ if(s.meeting) mtgMins[s.id]=(mtgMins[s.id]||0)+(s.end-s.start); }
   for(const mt of mtgs){ if(!isOn(mt)) continue;
-    raw.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins:mt.endMin-mt.startMin, meeting:true}); }
+    const mins = mtgMins[mt.id]||0; if(mins<=0) continue;
+    raw.push({key:'__meeting__', label:mt.title, sub:'', color:meetingColorFor(mt.title), mins, meeting:true}); }
   // drop "no jira" first, so Fit redistributes its time into the real jiras (still 7:30)
   const pool = TT_OMIT ? raw.filter(it=>it.key!=='__none__') : raw;
   const items = applyAdjust(pool);
@@ -1237,7 +1270,7 @@ function renderWeek(){
         ${holBadge}</div>`;
     if(c.has){
       const live = (liveTo!=null && d.date===BUILD_TODAY && c.m) ? {from:c.m.activeEnd, to:liveTo} : null;
-      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(d.date), live})}</div>`;
+      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(c.segs), live})}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
       html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
         <div class="legitem text-[11px]" data-jira="${esc(it.key)}">
@@ -1298,7 +1331,11 @@ function meetingColHTML(date, mf){
 function overrideColHTML(date, mf){
   let h=`<div id="ovrCol" class="relative rounded-lg bg-[#252c3b] border border-white/10 overflow-hidden cursor-copy" style="height:${BAR_H}px;width:118px">`;
   for(let hr=Math.ceil(mf.frameStart/60); hr*60<=mf.frameEnd; hr++){ h+=`<div class="gridline" style="top:${yFor(hr*60,mf)}px"></div>`; }
-  overridesForDay(date).forEach((b,idx)=>{
+  const list=overridesForDay(date);
+  // draw lowest-priority first so the one that actually wins the overlap (see
+  // overridePriority) ends up on top here too — the edit stack matches the result.
+  overridePriority(list).forEach(b=>{
+    const idx=list.indexOf(b);
     const top=yFor(b.start,mf), height=Math.max(6,yFor(b.end,mf)-top);
     const isBreak=b.type==='break', ident=b.jira||b.label||'';
     const col=isBreak?BREAKCOL:(ident?colorFor(ident):BREAKCOL);
@@ -1369,13 +1406,16 @@ function openDay(date){
   const axisHead = `<div><div class="text-center text-[11px] font-semibold mb-1.5 invisible" aria-hidden="true">x</div>${hourAxis(mf,true)}</div>`;
   let cols = `<div class="flex gap-4 items-start">${axisHead}`;
   cols += `<div class="pl-1"><div class="text-center text-[11px] font-semibold text-white mb-1.5">Resolved</div>
-           ${barHTML(mf,mergeSameJira(rsegs),'width:96px',{detail:true,breaks:mergedBreaks(date)})}</div>`;
-  if(mtgs.length){
-    cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${MEETING}">Meetings</div>${meetingColHTML(date,mf)}</div>`;
-  }
+           ${barHTML(mf,mergeSameJira(rsegs),'width:96px',{detail:true,breaks:mergedBreaks(rsegs)})}</div>`;
+  // Overrides sits right after Resolved, ahead of Meetings/lanes: it's the thing
+  // that overrules everything to its right, so it reads left-to-right as cause
+  // order rather than an alphabetical afterthought.
   cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${BREAKCOL}">Overrides</div>
            ${overrideColHTML(date,mf)}
            ${overridesForDay(date).length?`<button id="ovrClear" class="mt-1 w-full text-[10px] text-slate-500 hover:text-slate-300 underline">clear overrides</button>`:'<div class="mt-1 text-center text-[9px] text-slate-600">click to add</div>'}</div>`;
+  if(mtgs.length){
+    cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${MEETING}">Meetings</div>${meetingColHTML(date,mf)}</div>`;
+  }
   const laneIds = m ? [...new Set(m.segs.map(s=>s.lane))].sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0)) : [];
   for(const id of laneIds){
     const segs=m.segs.filter(s=>s.lane===id);
@@ -1389,6 +1429,7 @@ function openDay(date){
   // group the resolved segs by the active lens (timesheet code or jira)
   const grp={};   // gk -> {mins, jira, code, worked, meeting}
   for(const s of rsegs){
+    if(s.breakGhost) continue;
     const isM=s.meeting, gk=isM?'__meeting__':((s.fixed?'fix:':'')+groupKey(s.jira));
     const g=grp[gk] || (grp[gk]={mins:0, jira:isM?null:s.jira, code:(!isM&&grouped(s.jira))?codeOf(s.jira):null, worked:false, meeting:isM, fixed:!!s.fixed, custom:!!s.custom});
     g.mins+=(s.end-s.start);
