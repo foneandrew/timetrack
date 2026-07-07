@@ -237,8 +237,3 @@ before, run:
 ```bash
 ./bin/build-css   # needs node; recompiles + re-inlines the CSS
 ```
-
-## Not yet wired (fast-follows)
-- Per-JIRA totals in the week view; days-as-rows table shell.
-- Clockify project mapping; Jira page-view signal; shell-heartbeat + commit signals.
-- RRULE edge cases beyond WEEKLY/DAILY/MONTHLY; all-day events on the timeline.
