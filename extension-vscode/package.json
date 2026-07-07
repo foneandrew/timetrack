@@ -1,0 +1,15 @@
+{
+  "name": "timetrack-focus",
+  "displayName": "timetrack focus logger",
+  "description": "Logs which git worktree you're looking at in VSCode as heartbeat ticks for timetrack.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.75.0" },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "timetrack.testTick", "title": "timetrack: write a test focus tick" }
+    ]
+  }
+}

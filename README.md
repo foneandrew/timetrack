@@ -134,9 +134,12 @@ author. If that JIRA has no worktree activity that day, the row is badged
 work on it.
 
 Wiring (a Chrome extension can't write to disk, so a native-messaging host bridges it):
-1. `chrome://extensions` → enable Developer mode → **Load unpacked** → pick `extension/`.
+1. `chrome://extensions` → enable Developer mode → **Load unpacked** → pick the
+   `extension/` folder. The served Setup panel (🔌 Setup) shows its absolute path
+   ready to copy, and registers the host for you from the pasted ID.
 2. Copy the extension's **ID**, then run `extension/install-host.sh <id>` (registers
-   the host in every Chromium-family browser found).
+   the host in every Chromium-family browser found) — or paste the ID into the
+   Setup panel and hit **Register host**.
 3. Reload the extension. Click its toolbar icon once — it writes a `TEST-1` line to
    `~/.timetrack/review.log` to prove the bridge. Delete that line (or the file) before real use.
 
@@ -153,6 +156,52 @@ measurement. Setup, internals and tuning live in **[FOCUS.md](FOCUS.md)** —
 short version: enable iTerm2's Python API, run `./bin/install-focus-daemon.sh`,
 start it from Scripts → AutoLaunch. The builder folds `~/.timetrack/focus.log`
 in automatically when it's present.
+
+## VSCode focus (extension)
+
+`extension-vscode/` is the VSCode sibling of the iTerm2 daemon: it logs which
+worktree you're looking at while VSCode is frontmost, writing to the **same**
+`~/.timetrack/focus.log` in the same format, so the two interleave into one
+dwell timeline with no builder changes. The worktree comes from VSCode's Git
+extension, which reproduces the daemon's "only counts if it's a git repo" rule.
+
+Unlike the browser extension there's no native-messaging host — VSCode runs in
+Node and writes the log directly. Local-only, like Chrome's "load unpacked":
+
+1. Install it — either hit **Install into VSCode** in the served Setup panel
+   (🔌 Setup), or run `extension-vscode/install.sh` by hand. Both just symlink the
+   folder into `~/.vscode/extensions/` for every VSCode variant found.
+2. Reload VSCode (`Developer: Reload Window`).
+3. Verify with the command palette: **timetrack: write a test focus tick**.
+
+Its ticks are tagged `vscode` in `focus.log` (the daemon tags `iterm`), and the
+Setup panel shows a live status dot + last-tick for each, so you can see at a
+glance which logger's alive.
+
+## cmux focus (event-log tailer)
+
+`bin/timetrack-cmux-focus.py` does the same job for [cmux](https://cmux.com), the
+macOS terminal for running agents in parallel. It needs no socket, auth or config,
+reading two local files cmux maintains:
+
+- `~/.cmuxterm/events.jsonl` — lifecycle events. `window.keyed`/`window.unkeyed`
+  say whether cmux is the focused app; `workspace.selected` / `window.keyed` say
+  which workspace is selected.
+- `~/.cmuxterm/claude-hook-sessions.json` — the Claude session per workspace, with
+  its real `cwd`. We resolve the focused workspace to its live agent's cwd (the
+  actual project dir), *not* the shell's cwd — which is often just `~`, exactly
+  the reason the iTerm daemon reads cwd from the transcript rather than the tty.
+
+While cmux is focused and the resolved cwd is a git worktree it heartbeats a tick
+tagged `cmux` into `focus.log`, interleaving with the iTerm and VSCode ticks.
+
+Install it — **Install cmux logger** in the Setup panel, or `./bin/install-cmux-focus.sh`.
+Both register a launchd agent (cmux has no AutoLaunch-a-script hook) that runs at
+login and keeps the tailer alive. Check the current derived state any time with:
+
+```bash
+./bin/timetrack-cmux-focus.py --status
+```
 
 ## Hacking notes
 

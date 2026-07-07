@@ -172,11 +172,12 @@ def build_tty_claude_map():
 
 
 def write_tick(cwd, branch):
-    """Append `epoch \\t cwd \\t branch` to the focus log (never fatal)."""
+    """Append `epoch \\t cwd \\t branch \\t source` to the focus log (never fatal).
+    The source tags who logged it, so iTerm and VSCode ticks are tellable apart."""
     try:
         os.makedirs(os.path.dirname(FOCUS_LOG), exist_ok=True)
         with open(FOCUS_LOG, "a") as f:
-            f.write(f"{int(time.time())}\t{cwd}\t{branch or ''}\n")
+            f.write(f"{int(time.time())}\t{cwd}\t{branch or ''}\titerm\n")
     except OSError as e:
         log(f"write_tick failed: {e}")
 

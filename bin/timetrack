@@ -60,9 +60,9 @@ DEFAULTS = {
     "log_retain_weeks": 26,  # trim tick-log lines older than this on each build (0 = never trim)
 }
 
-# keys the served Settings panel is allowed to write back to config.json
+# keys the served UI is allowed to write back to config.json
 EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min",
-                 "weeks", "holiday_region", "skip_meetings", "log_retain_weeks"}
+                 "weeks", "holiday_region", "skip_meetings", "log_retain_weeks", "ics_url"}
 
 # NZ regions -> Nager.Date ISO-3166-2 county codes, for filtering provincial
 # anniversary days. National holidays (global) are always included.
@@ -687,9 +687,10 @@ MIN_DWELL_SEC = 30
 
 
 def collect_focus(start_dt, end_dt, other_events):
-    """iTerm2 focus ticks: <epoch>\t<cwd>\t<branch>. Groups consecutive same-lane
-    ticks into dwell runs — broken by any signal on a different lane — and emits
-    the runs that span >= MIN_DWELL_SEC as focus events on the worktree lane."""
+    """Focus ticks: <epoch>\t<cwd>\t<branch>[\t<source>]. Source (iterm/vscode) is
+    optional — legacy lines omit it. Groups consecutive same-lane ticks into dwell
+    runs — broken by any signal on a different lane — and emits the runs that span
+    >= MIN_DWELL_SEC as focus events on the worktree lane."""
     events = []
     lanes = {}
     if not FOCUS_LOG.exists():
@@ -911,6 +912,7 @@ def update_config(updates):
     """Merge whitelisted preference keys into config.json (preserving the rest).
     Coerces the minute/week fields to int; ignores anything not editable."""
     cfg = read_raw_config()
+    touched_ics = False
     for k, v in (updates or {}).items():
         if k not in EDITABLE_KEYS:
             continue
@@ -923,8 +925,17 @@ def update_config(updates):
             if not isinstance(v, list):
                 continue
             v = [s.strip() for s in v if isinstance(s, str) and s.strip()]
+        elif k == "ics_url":
+            v = (v or "").strip() or None    # blank unsets it
+            touched_ics = True
         cfg[k] = v
     write_raw_config(cfg)
+    if touched_ics:
+        # a URL change must refetch, not serve the 5-min cache of the old calendar
+        try:
+            ICS_CACHE.unlink()
+        except OSError:
+            pass
     return cfg
 
 
@@ -1006,6 +1017,7 @@ def _open_browser(port):
 
 ITERM_AUTOLAUNCH = (HOME / "Library" / "Application Support" / "iTerm2"
                     / "Scripts" / "AutoLaunch" / "timetrack-focus.py")
+CMUX_AGENT_PLIST = HOME / "Library" / "LaunchAgents" / "com.timetrack.cmux-focus.plist"
 # Chromium-family app-support dirs the review host is registered into (mirrors
 # extension/install-host.sh), mapped to friendly names for the Setup panel.
 BROWSER_DIRS = [
@@ -1033,6 +1045,35 @@ def _last_tick_epoch(logpath):
     return last
 
 
+VSCODE_EXT_DIRS = [".vscode", ".vscode-insiders", ".vscode-oss"]
+
+
+def _vscode_ext_linked():
+    """True if the focus extension is installed into any VSCode variant."""
+    return any((HOME / d / "extensions" / "timetrack-focus").exists()
+               for d in VSCODE_EXT_DIRS)
+
+
+def _last_focus_tick(source):
+    """Epoch of the most recent focus.log tick from `source` (iterm/vscode).
+    Legacy lines with no source field count as 'iterm' — they all predate the
+    VSCode logger."""
+    if not FOCUS_LOG.exists():
+        return None
+    last = None
+    try:
+        for line in FOCUS_LOG.read_text(errors="replace").splitlines():
+            parts = line.split("\t")
+            if not parts[0].isdigit():
+                continue
+            src = parts[3] if len(parts) > 3 and parts[3] else "iterm"
+            if src == source:
+                last = int(parts[0])
+    except OSError:
+        return None
+    return last
+
+
 def setup_status():
     """Live state of the two integrations, for the served Setup panel."""
     try:
@@ -1040,14 +1081,30 @@ def setup_status():
                                  capture_output=True).returncode == 0
     except OSError:
         running = False
+    try:
+        cmux_running = subprocess.run(["pgrep", "-f", "timetrack-cmux-focus"],
+                                      capture_output=True).returncode == 0
+    except OSError:
+        cmux_running = False
     browsers = [name for d, name in BROWSER_DIRS
                 if (HOME / "Library" / "Application Support" / d
                     / "NativeMessagingHosts" / "com.timetrack.review.json").exists()]
+    ics = read_raw_config().get("ics_url")
+    try:
+        last_sync = int(ICS_CACHE.stat().st_mtime) if ICS_CACHE.exists() else None
+    except OSError:
+        last_sync = None
     return {
         "focus": {"linked": ITERM_AUTOLAUNCH.exists(), "running": running,
-                  "lastTick": _last_tick_epoch(FOCUS_LOG)},
+                  "lastTick": _last_focus_tick("iterm")},
+        "vscode": {"linked": _vscode_ext_linked(),
+                   "lastTick": _last_focus_tick("vscode")},
+        "cmux": {"linked": CMUX_AGENT_PLIST.exists(), "running": cmux_running,
+                 "lastTick": _last_focus_tick("cmux")},
         "review": {"registered": bool(browsers), "browsers": browsers,
-                   "lastTick": _last_tick_epoch(REVIEW_LOG)},
+                   "lastTick": _last_tick_epoch(REVIEW_LOG),
+                   "extPath": str(Path(__file__).resolve().parent.parent / "extension")},
+        "calendar": {"configured": bool(ics), "url": ics or "", "lastSync": last_sync},
     }
 
 
@@ -1063,6 +1120,14 @@ def _run_installer(args):
 
 def install_focus_daemon():
     return _run_installer(["bash", str(Path(__file__).resolve().parent / "install-focus-daemon.sh")])
+
+
+def install_vscode_ext():
+    return _run_installer(["bash", str(Path(__file__).resolve().parent.parent / "extension-vscode" / "install.sh")])
+
+
+def install_cmux_focus():
+    return _run_installer(["bash", str(Path(__file__).resolve().parent / "install-cmux-focus.sh")])
 
 
 def install_review_host(ext_id):
@@ -1153,6 +1218,10 @@ def _serve(weeks, port, open_browser=True):
                 self._api(rm_code)
             elif path == "/setup/install-focus":
                 self._api(install_focus_daemon)
+            elif path == "/setup/install-vscode":
+                self._api(install_vscode_ext)
+            elif path == "/setup/install-cmux":
+                self._api(install_cmux_focus)
             elif path == "/setup/install-host":
                 self._api(lambda: install_review_host(self._json_body().get("id", "")))
             else:

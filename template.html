@@ -556,14 +556,39 @@ function refreshSetup(){
     .catch(()=>{ b.innerHTML='<div class="text-rose-300 text-sm py-4">couldn’t reach the server</div>'; });
 }
 function setupHTML(s){
-  const f=s.focus, r=s.review;
+  const f=s.focus, r=s.review, c=s.calendar||{configured:false,url:'',lastSync:null};
+  const v=s.vscode||{linked:false,lastTick:null};
   const fState=f.running?'ok':(f.linked?'warn':'off');
   const fMsg=f.running?'daemon running':(f.linked?'linked, not running yet':'not linked');
+  const vState=(v.linked&&v.lastTick)?'ok':(v.linked?'warn':'off');
+  const vMsg=v.linked?'extension linked':'not linked';
+  const vMuted = v.linked ? 'opacity-40' : '';
+  const x=s.cmux||{linked:false,running:false,lastTick:null};
+  const xState=x.running?'ok':(x.linked?'warn':'off');
+  const xMsg=x.running?'daemon running':(x.linked?'installed, not running yet':'not installed');
+  const xMuted = x.linked ? 'opacity-40' : '';
   const rState=(r.registered&&r.lastTick)?'ok':(r.registered?'warn':'off');
   const rMsg=r.registered?('host registered'+(r.browsers.length?' · '+r.browsers.join(', '):'')):'host not registered';
+  const cState=c.configured?(c.lastSync?'ok':'warn'):'off';
+  const cMsg=c.configured?('calendar linked · last sync '+setupAgo(c.lastSync)):'no calendar linked';
   const fMuted = f.linked ? 'opacity-40' : '';      // installed → de-emphasise the how-to
   const rMuted = r.registered ? 'opacity-40' : '';
+  const cMuted = c.configured ? 'opacity-40' : '';
   return `
+   <section class="mb-5">
+     <div class="flex items-center gap-2 mb-0.5">${dot(cState)}<h3 class="font-semibold text-white">Outlook calendar</h3>${c.configured?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
+     <div class="text-xs text-slate-400 mb-2">${cMsg}</div>
+     <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${cMuted}">
+       <li>In Outlook <span class="text-slate-500">(web, one-time)</span>: Settings → Calendar → Shared calendars → publish your calendar, then copy the <b>ICS</b> link.</li>
+       <li>Paste it here:
+         <div class="flex gap-2 mt-1.5">
+           <input id="suIcs" placeholder="https://outlook.office365.com/owa/calendar/…/calendar.ics" value="${esc(c.url||'')}" class="flex-1 min-w-0 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100 mono text-xs">
+           <button id="suIcsSave" class="tab shrink-0 px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Save</button>
+         </div>
+         ${c.configured?'<button id="suIcsClear" class="mt-1.5 text-[11px] text-slate-500 hover:text-rose-300 underline">remove calendar</button>':''}</li>
+     </ol>
+     <div id="suIcsMsg" class="text-xs mt-2"></div>
+   </section>
    <section class="mb-5">
      <div class="flex items-center gap-2 mb-0.5">${dot(fState)}<h3 class="font-semibold text-white">iTerm terminal focus</h3>${f.linked?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
      <div class="text-xs text-slate-400 mb-2">${fMsg} · last tick ${setupAgo(f.lastTick)}</div>
@@ -573,11 +598,31 @@ function setupHTML(s){
        <li>Start it: Scripts → AutoLaunch → <span class="mono">timetrack-focus.py</span> (or relaunch iTerm).</li>
      </ol>
    </section>
+   <section class="mb-5">
+     <div class="flex items-center gap-2 mb-0.5">${dot(vState)}<h3 class="font-semibold text-white">VSCode editor focus</h3>${v.linked?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
+     <div class="text-xs text-slate-400 mb-2">${vMsg} · last tick ${setupAgo(v.lastTick)}</div>
+     <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${vMuted}">
+       <li><button id="suVscode" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Install into VSCode</button> <span class="text-slate-500">(symlinks into ~/.vscode/extensions)</span></li>
+       <li>Reload VSCode: <span class="mono">Developer: Reload Window</span>.</li>
+       <li>Verify: command palette → <span class="mono">timetrack: write a test focus tick</span>.</li>
+     </ol>
+     <div id="suVscodeMsg" class="text-xs mt-2"></div>
+   </section>
+   <section class="mb-5">
+     <div class="flex items-center gap-2 mb-0.5">${dot(xState)}<h3 class="font-semibold text-white">cmux terminal focus</h3>${x.linked?'<span class="text-emerald-300 text-xs">✓ installed</span>':''}</div>
+     <div class="text-xs text-slate-400 mb-2">${xMsg} · last tick ${setupAgo(x.lastTick)}</div>
+     <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${xMuted}">
+       <li><button id="suCmux" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Install cmux logger</button> <span class="text-slate-500">(launchd agent, tails cmux's event log)</span></li>
+     </ol>
+     <div id="suCmuxMsg" class="text-xs mt-2"></div>
+   </section>
    <section>
      <div class="flex items-center gap-2 mb-0.5">${dot(rState)}<h3 class="font-semibold text-white">GitHub review extension</h3>${r.registered?'<span class="text-emerald-300 text-xs">✓ registered</span>':''}</div>
      <div class="text-xs text-slate-400 mb-2">${rMsg} · last tick ${setupAgo(r.lastTick)}</div>
      <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${rMuted}">
-       <li><span class="mono">chrome://extensions</span> <span class="text-slate-500">(GUI)</span> → Developer mode → Load unpacked → pick the <span class="mono">extension/</span> folder.</li>
+       <li><span class="mono">chrome://extensions</span> <span class="text-slate-500">(GUI)</span> → Developer mode → Load unpacked → pick this folder:
+         <input readonly onclick="this.select()" value="${esc(r.extPath||'extension/')}" title="click to select, then copy" class="mt-1.5 w-full bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100 mono text-[11px] cursor-copy">
+       </li>
        <li>Copy its ID, paste it here and register the host:
          <div class="flex gap-2 mt-1.5">
            <input id="suExtId" placeholder="extension id (32 letters)" class="flex-1 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100 mono text-xs">
@@ -598,6 +643,16 @@ function wireSetup(){
     fetch('/setup/install-focus',{method:'POST'}).then(r=>r.json())
       .then(j=>{ setupMsg(j); refreshSetup(); })
       .catch(()=>{ unbusy(fb,'Link daemon into AutoLaunch'); setupMsg({ok:false,out:'request failed'}); }); };
+  const vb=document.getElementById('suVscode');
+  if(vb) vb.onclick=()=>{ busy(vb,'Installing…');
+    fetch('/setup/install-vscode',{method:'POST'}).then(r=>r.json())
+      .then(j=>{ setVscodeMsg(j); refreshSetup(); })
+      .catch(()=>{ unbusy(vb,'Install into VSCode'); setVscodeMsg({ok:false,out:'request failed'}); }); };
+  const xb=document.getElementById('suCmux');
+  if(xb) xb.onclick=()=>{ busy(xb,'Installing…');
+    fetch('/setup/install-cmux',{method:'POST'}).then(r=>r.json())
+      .then(j=>{ setCmuxMsg(j); refreshSetup(); })
+      .catch(()=>{ unbusy(xb,'Install cmux logger'); setCmuxMsg({ok:false,out:'request failed'}); }); };
   const hb=document.getElementById('suHost');
   if(hb) hb.onclick=()=>{ const id=document.getElementById('suExtId').value.trim();
     if(!id){ setupMsg({ok:false,out:'paste the extension id first'}); return; }
@@ -605,7 +660,27 @@ function wireSetup(){
     fetch('/setup/install-host',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})
       .then(r=>r.json()).then(j=>{ setupMsg(j); refreshSetup(); })
       .catch(()=>{ unbusy(hb,'Register host'); setupMsg({ok:false,out:'request failed'}); }); };
+  // Calendar: save/clear the ICS url through the same /config path, then reload so
+  // the freshly-baked meetings show. A reload is needed — meetings are baked in, not live.
+  const saveIcs=(url,btn,label)=>{ busy(btn,'Saving…');
+    fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ics_url:url})})
+      .then(r=>{ if(!r.ok) throw new Error('bad'); return r.json(); })
+      .then(()=>location.reload())
+      .catch(()=>{ unbusy(btn,label); setIcsMsg({ok:false,out:'failed — is the server still running?'}); }); };
+  const ib=document.getElementById('suIcsSave');
+  if(ib) ib.onclick=()=>saveIcs(document.getElementById('suIcs').value.trim(), ib, 'Save');
+  const cb=document.getElementById('suIcsClear');
+  if(cb) cb.onclick=()=>{ if(confirm('Remove the linked calendar?')) saveIcs('', cb, 'remove calendar'); };
 }
+function setVscodeMsg(j){ const m=document.getElementById('suVscodeMsg'); if(!m) return;
+  m.className='text-xs mt-2 '+(j.ok?'text-emerald-300':'text-rose-300');
+  m.textContent=(j.ok?'✓ ':'✕ ')+((j.out||'').split('\n').pop()||''); }
+function setCmuxMsg(j){ const m=document.getElementById('suCmuxMsg'); if(!m) return;
+  m.className='text-xs mt-2 '+(j.ok?'text-emerald-300':'text-rose-300');
+  m.textContent=(j.ok?'✓ ':'✕ ')+((j.out||'').split('\n').pop()||''); }
+function setIcsMsg(j){ const m=document.getElementById('suIcsMsg'); if(!m) return;
+  m.className='text-xs mt-2 '+(j.ok?'text-emerald-300':'text-rose-300');
+  m.textContent=(j.ok?'✓ ':'✕ ')+((j.out||'').split('\n').pop()||''); }
 function openSettings(){
   document.getElementById('cfgStart').value = fmt(FRAME.startMin);
   document.getElementById('cfgEnd').value   = fmt(FRAME.endMin);
