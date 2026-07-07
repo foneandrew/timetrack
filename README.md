@@ -1,10 +1,33 @@
 # timetrack
 
-Reconstructs a rough, **visual** picture of where *your* attention went each day
-across parallel git worktrees — so you can fill in timesheets without remembering
-a fortnight of context-switching.
+A personal tool I built to scratch my own itch at work. I run several Claude
+agents in parallel, each in its own git worktree on a different ticket, and
+jumping between them all day makes it genuinely hard to remember where my time
+actually went when it comes to filling in a timesheet. This reconstructs a rough,
+**visual** picture of where *my* attention went each day so I don't have to.
+
+It's shared in case the approach is useful to someone with the same problem, but
+it's shaped around my own setup (iTerm2/cmux/VSCode, Outlook calendar, our JIRA
+conventions) — treat it as a worked example, not a polished product.
 
 Rough beats precise. You stay in the loop: it shows you the picture, you read it.
+
+## How it works, in principle
+
+There's no timer to start and stop. Instead it reads the trails you *already*
+leave while working, and stitches them into a timeline after the fact:
+
+- Every human-typed Claude prompt is timestamped and tagged with the worktree
+  (hence the ticket) it was typed in.
+- Branch checkouts, terminal/editor focus, and PR-review activity add extra
+  signal about which piece of work was in front of you when.
+
+From those it applies one simple rule — **latest-wins**: whichever piece of work
+you last acted in "owns" your attention until the next signal lands somewhere
+else. Meetings from your calendar overlay on top. The result is a bar per day,
+segmented by ticket, that's close enough to fill in a timesheet from — without
+having tracked a single minute by hand. The rest of this README is the plumbing
+that makes that work.
 
 ## Run
 
