@@ -49,8 +49,8 @@ DEFAULTS = {
     "app_paths": [str(HOME / "dev" / "cmr-web")],
     "ics_url": None,        # Outlook published calendar .ics (secret — keep out of git)
     "skip_meetings": [],    # meeting title substrings that default to OFF
-    "jira_names": {},       # override derived names, e.g. {"PBL-7198": "EFS comparison"}
-    "jira_codes": {},       # group JIRAs under a timesheet code, e.g. {"PBL-7198": "PLATFORM"}
+    "jira_names": {},       # override derived names, e.g. {"PROJ-123": "billing rework"}
+    "jira_codes": {},       # group JIRAs under a timesheet code, e.g. {"PROJ-123": "PLATFORM"}
     # personal preferences — editable in config.json or the served Settings panel
     "day_start": "08:00",   # start of the framed working day
     "day_end": "17:00",     # end of the framed working day
@@ -127,7 +127,7 @@ def jira_from(branch):
 
 def name_from_branch(branch, jira):
     """Derive a human name for a JIRA from its branch slug.
-    'pbl-7198/efs-comparison' + PBL-7198 -> 'efs comparison'."""
+    'proj-123/billing-rework' + PROJ-123 -> 'billing rework'."""
     if not branch or not jira:
         return None
     s = re.sub(r"^" + re.escape(jira), "", branch, flags=re.I)  # drop the tag
@@ -227,7 +227,7 @@ def lane_meta(cwd, app_paths):
     p = cwd.rstrip("/")
     is_app = any(p == a.rstrip("/") for a in app_paths)
     parts = p.split("/")
-    # nice label: for ~/dev/cmr-web-ralph/pbl-7198 -> "cmr-web-ralph/pbl-7198"
+    # nice label: for ~/dev/myrepo-worktrees/proj-123 -> "myrepo-worktrees/proj-123"
     label = "/".join(parts[-2:]) if len(parts) >= 2 else p
     repo = parts[-1]
     return {"id": p, "path": p, "label": label, "repo": repo, "isApp": is_app}

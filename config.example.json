@@ -10,5 +10,5 @@
   "round_to_min": 15,
   "weeks": 4,
 
-  "jira_codes": {"PBL-1234": "PLATFORM", "PBL-5678": "PLATFORM"}
+  "jira_codes": {"PROJ-123": "PLATFORM", "PROJ-456": "PLATFORM"}
 }

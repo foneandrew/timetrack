@@ -143,7 +143,7 @@ Wiring (a Chrome extension can't write to disk, so a native-messaging host bridg
 
 Test the host alone (no extension needed):
 ```bash
-python3 -c 'import struct,sys,json; m=json.dumps({"epoch":1,"jira":"PBL-1"}).encode(); sys.stdout.buffer.write(struct.pack("<I",len(m))+m)' | bin/timetrack-review-host
+python3 -c 'import struct,sys,json; m=json.dumps({"epoch":1,"jira":"PROJ-1"}).encode(); sys.stdout.buffer.write(struct.pack("<I",len(m))+m)' | bin/timetrack-review-host
 ```
 
 ## Terminal focus (iTerm2 daemon)
