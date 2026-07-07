@@ -473,6 +473,22 @@ function refreshAll(){ renderAdjust(); renderWeek(); renderLegend(); if(currentD
 // served over http:// by `timetrack --serve`? then the Regenerate button can re-grep
 const SERVED = location.protocol==='http:' || location.protocol==='https:';
 let SETUP_STATE = null;   // last /setup-status, for the toolbar button + muting
+// Transient "show me the how-to for this integration" reveal — NOT persisted.
+// Anything already working shows regardless; this only un-collapses an off one
+// while you set it up, and resets on reload (by then a working one stays shown).
+let SETUP_SHOW = {};
+// Per-integration state from a /setup-status blob: 'ok' | 'warn' | 'off'.
+// 'off' = untouched; 'warn' = half-set-up (installed but no ticks yet); 'ok' = live.
+function setupStates(s){
+  const f=s.focus||{}, r=s.review||{}, c=s.calendar||{}, v=s.vscode||{}, x=s.cmux||{};
+  return {
+    calendar: c.configured?(c.lastSync?'ok':'warn'):'off',
+    iterm:    f.running?'ok':(f.linked?'warn':'off'),
+    vscode:   (v.linked&&v.lastTick)?'ok':(v.linked?'warn':'off'),
+    cmux:     x.running?'ok':(x.linked?'warn':'off'),
+    review:   (r.registered&&r.lastTick)?'ok':(r.registered?'warn':'off'),
+  };
+}
 function loadSetupState(){
   if(!SERVED) return;
   fetch('/setup-status').then(r=>r.json()).then(s=>{ SETUP_STATE=s; renderAdjust(); }).catch(()=>{});
@@ -502,7 +518,11 @@ function renderAdjust(){
   const el=document.getElementById('adjust'); if(!el) return;
   const pill=(on)=> on?'bg-blue-500 border-blue-400 text-white':'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10';
   const note = TT_FIT ? `scaled to ${fitLabel} (meetings fixed)` : '';
-  const setupDone = SETUP_STATE && SETUP_STATE.focus.linked && SETUP_STATE.review.registered;
+  // Green when nothing's half-finished and at least one integration is live —
+  // so a cmux-only (or any-subset) setup counts as done, no nagging for the rest.
+  let setupDone=false;
+  if(SETUP_STATE){ const v=Object.values(setupStates(SETUP_STATE));
+    setupDone = v.some(x=>x==='ok') && !v.some(x=>x==='warn'); }
   const setupBtn = setupDone
     ? `<button id="tSetup" class="tab px-3 py-1 rounded-lg border bg-transparent border-white/5 text-slate-500 hover:bg-white/5" title="Integrations — all set up">✓ Setup</button>`
     : `<button id="tSetup" class="tab px-3 py-1 rounded-lg border font-medium bg-white/5 border-white/10 text-slate-300 hover:bg-white/10" title="Integrations status &amp; setup">🔌 Setup</button>`;
@@ -550,33 +570,45 @@ function setupAgo(ep){
 }
 function dot(state){ const c = state==='ok'?'#4ade80':(state==='warn'?'#fbbf24':'#64748b');
   return `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c}"></span>`; }
+function renderSetup(){
+  const b=document.getElementById('setupBody'); if(!b) return;
+  b.innerHTML=setupHTML(SETUP_STATE); wireSetup(); renderAdjust();
+}
 function refreshSetup(){
   const b=document.getElementById('setupBody'); b.innerHTML='<div class="text-slate-400 text-sm py-4">checking…</div>';
-  fetch('/setup-status').then(r=>r.json()).then(s=>{ SETUP_STATE=s; b.innerHTML=setupHTML(s); wireSetup(); renderAdjust(); })
+  fetch('/setup-status').then(r=>r.json()).then(s=>{ SETUP_STATE=s; renderSetup(); })
     .catch(()=>{ b.innerHTML='<div class="text-rose-300 text-sm py-4">couldn’t reach the server</div>'; });
+}
+// A section header: status dot + name, and on the right either a "working" badge
+// (when it's live/installed) or a "set up"/"hide" toggle that reveals the how-to.
+function setupHead(key, state, name, workingBadge){
+  const working = state!=='off';
+  const ctrl = working
+    ? `<span class="ml-auto text-emerald-300 text-xs">${workingBadge}</span>`
+    : `<button data-sushow="${key}" class="ml-auto text-xs px-2 py-0.5 rounded-lg border border-white/10 text-slate-400 hover:bg-white/10">${SETUP_SHOW[key]?'hide':'set up'}</button>`;
+  return `<div class="flex items-center gap-2 mb-0.5">${dot(state)}<h3 class="font-semibold text-white">${name}</h3>${ctrl}</div>`;
 }
 function setupHTML(s){
   const f=s.focus, r=s.review, c=s.calendar||{configured:false,url:'',lastSync:null};
   const v=s.vscode||{linked:false,lastTick:null};
-  const fState=f.running?'ok':(f.linked?'warn':'off');
-  const fMsg=f.running?'daemon running':(f.linked?'linked, not running yet':'not linked');
-  const vState=(v.linked&&v.lastTick)?'ok':(v.linked?'warn':'off');
-  const vMsg=v.linked?'extension linked':'not linked';
-  const vMuted = v.linked ? 'opacity-40' : '';
   const x=s.cmux||{linked:false,running:false,lastTick:null};
-  const xState=x.running?'ok':(x.linked?'warn':'off');
+  const st=setupStates(s);
+  const fMsg=f.running?'daemon running':(f.linked?'linked, not running yet':'not linked');
+  const vMsg=v.linked?'extension linked':'not linked';
   const xMsg=x.running?'daemon running':(x.linked?'installed, not running yet':'not installed');
-  const xMuted = x.linked ? 'opacity-40' : '';
-  const rState=(r.registered&&r.lastTick)?'ok':(r.registered?'warn':'off');
   const rMsg=r.registered?('host registered'+(r.browsers.length?' · '+r.browsers.join(', '):'')):'host not registered';
-  const cState=c.configured?(c.lastSync?'ok':'warn'):'off';
   const cMsg=c.configured?('calendar linked · last sync '+setupAgo(c.lastSync)):'no calendar linked';
   const fMuted = f.linked ? 'opacity-40' : '';      // installed → de-emphasise the how-to
   const rMuted = r.registered ? 'opacity-40' : '';
   const cMuted = c.configured ? 'opacity-40' : '';
+  const vMuted = v.linked ? 'opacity-40' : '';
+  const xMuted = x.linked ? 'opacity-40' : '';
+  // Show a section's how-to when it's already touched (ok/warn) or you asked to.
+  const show=(k)=> st[k]!=='off' || !!SETUP_SHOW[k];
   return `
    <section class="mb-5">
-     <div class="flex items-center gap-2 mb-0.5">${dot(cState)}<h3 class="font-semibold text-white">Outlook calendar</h3>${c.configured?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
+     ${setupHead('calendar', st.calendar, 'Outlook calendar', '✓ linked')}
+     ${show('calendar') ? `
      <div class="text-xs text-slate-400 mb-2">${cMsg}</div>
      <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${cMuted}">
        <li>In Outlook <span class="text-slate-500">(web, one-time)</span>: Settings → Calendar → Shared calendars → publish your calendar, then copy the <b>ICS</b> link.</li>
@@ -587,37 +619,41 @@ function setupHTML(s){
          </div>
          ${c.configured?'<button id="suIcsClear" class="mt-1.5 text-[11px] text-slate-500 hover:text-rose-300 underline">remove calendar</button>':''}</li>
      </ol>
-     <div id="suIcsMsg" class="text-xs mt-2"></div>
+     <div id="suIcsMsg" class="text-xs mt-2"></div>` : ''}
    </section>
    <section class="mb-5">
-     <div class="flex items-center gap-2 mb-0.5">${dot(fState)}<h3 class="font-semibold text-white">iTerm terminal focus</h3>${f.linked?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
+     ${setupHead('iterm', st.iterm, 'iTerm terminal focus', '✓ linked')}
+     ${show('iterm') ? `
      <div class="text-xs text-slate-400 mb-2">${fMsg} · last tick ${setupAgo(f.lastTick)}</div>
      <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${fMuted}">
        <li>In iTerm <span class="text-slate-500">(GUI, one-time)</span>: Settings → General → Magic → enable <b>Python API</b>, then Scripts → Manage → <b>Install Python Runtime</b>.</li>
        <li><button id="suFocus" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Link daemon into AutoLaunch</button></li>
        <li>Start it: Scripts → AutoLaunch → <span class="mono">timetrack-focus.py</span> (or relaunch iTerm).</li>
-     </ol>
+     </ol>` : ''}
    </section>
    <section class="mb-5">
-     <div class="flex items-center gap-2 mb-0.5">${dot(vState)}<h3 class="font-semibold text-white">VSCode editor focus</h3>${v.linked?'<span class="text-emerald-300 text-xs">✓ linked</span>':''}</div>
+     ${setupHead('vscode', st.vscode, 'VSCode editor focus', '✓ linked')}
+     ${show('vscode') ? `
      <div class="text-xs text-slate-400 mb-2">${vMsg} · last tick ${setupAgo(v.lastTick)}</div>
      <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${vMuted}">
        <li><button id="suVscode" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Install into VSCode</button> <span class="text-slate-500">(symlinks into ~/.vscode/extensions)</span></li>
        <li>Reload VSCode: <span class="mono">Developer: Reload Window</span>.</li>
        <li>Verify: command palette → <span class="mono">timetrack: write a test focus tick</span>.</li>
      </ol>
-     <div id="suVscodeMsg" class="text-xs mt-2"></div>
+     <div id="suVscodeMsg" class="text-xs mt-2"></div>` : ''}
    </section>
    <section class="mb-5">
-     <div class="flex items-center gap-2 mb-0.5">${dot(xState)}<h3 class="font-semibold text-white">cmux terminal focus</h3>${x.linked?'<span class="text-emerald-300 text-xs">✓ installed</span>':''}</div>
+     ${setupHead('cmux', st.cmux, 'cmux terminal focus', '✓ installed')}
+     ${show('cmux') ? `
      <div class="text-xs text-slate-400 mb-2">${xMsg} · last tick ${setupAgo(x.lastTick)}</div>
      <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${xMuted}">
        <li><button id="suCmux" class="tab px-2.5 py-1 rounded-lg border text-xs bg-white/5 border-white/10 hover:bg-white/10">Install cmux logger</button> <span class="text-slate-500">(launchd agent, tails cmux's event log)</span></li>
      </ol>
-     <div id="suCmuxMsg" class="text-xs mt-2"></div>
+     <div id="suCmuxMsg" class="text-xs mt-2"></div>` : ''}
    </section>
    <section>
-     <div class="flex items-center gap-2 mb-0.5">${dot(rState)}<h3 class="font-semibold text-white">GitHub review extension</h3>${r.registered?'<span class="text-emerald-300 text-xs">✓ registered</span>':''}</div>
+     ${setupHead('review', st.review, 'GitHub review extension', '✓ registered')}
+     ${show('review') ? `
      <div class="text-xs text-slate-400 mb-2">${rMsg} · last tick ${setupAgo(r.lastTick)}</div>
      <ol class="text-sm text-slate-300 list-decimal ml-5 space-y-1.5 ${rMuted}">
        <li><span class="mono">chrome://extensions</span> <span class="text-slate-500">(GUI)</span> → Developer mode → Load unpacked → pick this folder:
@@ -630,7 +666,7 @@ function setupHTML(s){
          </div></li>
        <li>Reload the extension, then click its toolbar icon once to test the bridge.</li>
      </ol>
-     <div id="suMsg" class="text-xs mt-2"></div>
+     <div id="suMsg" class="text-xs mt-2"></div>` : ''}
    </section>
    <div class="flex justify-end mt-4"><button onclick="refreshSetup()" class="text-xs px-3 py-1.5 rounded-lg text-slate-300 hover:bg-white/10">↻ Re-check</button></div>`;
 }
@@ -638,6 +674,9 @@ function setupMsg(j){ const m=document.getElementById('suMsg'); if(!m) return;
   m.className='text-xs mt-2 '+(j.ok?'text-emerald-300':'text-rose-300');
   m.textContent=(j.ok?'✓ ':'✕ ')+((j.out||'').split('\n').pop()||''); }
 function wireSetup(){
+  document.querySelectorAll('[data-sushow]').forEach(el=>{
+    el.onclick=()=>{ const k=el.dataset.sushow; SETUP_SHOW[k]=!SETUP_SHOW[k]; renderSetup(); };
+  });
   const fb=document.getElementById('suFocus');
   if(fb) fb.onclick=()=>{ busy(fb,'Linking…');
     fetch('/setup/install-focus',{method:'POST'}).then(r=>r.json())
