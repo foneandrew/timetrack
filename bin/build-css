@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Compile the Tailwind classes used in template.html to static CSS and inline
+# the result into its <style id="tw"> block, keeping the report self-contained
+# (no CDN dependency, works over file:// and offline).
+#
+# Run after adding utility classes template.html hasn't used before. Needs node
+# (npx); everything else is stdlib.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+cat > "$tmp/tailwind.config.js" <<EOF
+module.exports = { content: ["$PWD/template.html"] }
+EOF
+cat > "$tmp/in.css" <<'EOF'
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+EOF
+
+npx -y tailwindcss@3.4.17 -c "$tmp/tailwind.config.js" -i "$tmp/in.css" -o "$tmp/out.css" --minify
+
+CSS_FILE="$tmp/out.css" python3 - <<'EOF'
+import os, re, pathlib
+css = pathlib.Path(os.environ["CSS_FILE"]).read_text().strip()
+tpl = pathlib.Path("template.html")
+html = tpl.read_text()
+new, n = re.subn(r'(<style id="tw">).*?(</style>)',
+                 lambda m: m.group(1) + css + m.group(2), html, count=1, flags=re.S)
+assert n == 1, 'no <style id="tw"> block found in template.html'
+tpl.write_text(new)
+print(f"inlined {len(css)} bytes of CSS into template.html")
+EOF

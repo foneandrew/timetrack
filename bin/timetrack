@@ -59,11 +59,12 @@ DEFAULTS = {
     "round_to_min": 15,     # "Round to" granularity
     "weeks": 4,             # default number of weeks to scan when -w isn't given
     "holiday_region": "Wellington",  # NZ region for provincial anniversary days (or null = national only)
+    "log_retain_weeks": 26,  # trim tick-log lines older than this on each build (0 = never trim)
 }
 
 # keys the served Settings panel is allowed to write back to config.json
 EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min",
-                 "weeks", "holiday_region", "skip_meetings"}
+                 "weeks", "holiday_region", "skip_meetings", "log_retain_weeks"}
 
 # NZ regions -> Nager.Date ISO-3166-2 county codes, for filtering provincial
 # anniversary days. National holidays (global) are always included.
@@ -301,7 +302,7 @@ def collect_checkouts(start_dt, end_dt, app_paths):
         lanes[lm["id"]] = lm
         events.append({
             "date": local.date().isoformat(),
-            "minute": local.hour * 60 + local.minute,
+            "minute": minute_of(local),
             "ts": local.isoformat(),
             "lane": lm["id"],
             "jira": jira_from(branch),
@@ -500,17 +501,24 @@ def expand_meeting(ev, win_start, win_end):
     title = ics_unescape(ev.get("SUMMARY") or "(no title)")
     status = ev.get("STATUS", "")
     busy = ev.get("X-MICROSOFT-CDO-BUSYSTATUS", "")
-    exset = set()
+    # datetime-valued EXDATEs match one exact occurrence, so a cancelled morning
+    # slot doesn't nuke a same-day afternoon one; DATE-valued EXDATEs (all-day
+    # exceptions) still knock out the whole day.
+    ex_dts, ex_dates = set(), set()
     for val, params in ev.get("EXDATE", []):
         for piece in val.split(","):
             try:
-                exset.add(parse_ics_dt(piece, params)[0].date())
+                exd, ex_all_day = parse_ics_dt(piece, params)
+                if ex_all_day:
+                    ex_dates.add(exd.date())
+                else:
+                    ex_dts.add(exd)
             except Exception:
                 pass
     starts = expand_rrule(start_dt, ev["RRULE"], win_end) if ev.get("RRULE") else [start_dt]
     out = []
     for s in starts:
-        if s.date() in exset or not (win_start <= s.date() <= win_end) or s.weekday() >= 5:
+        if s in ex_dts or s.date() in ex_dates or not (win_start <= s.date() <= win_end) or s.weekday() >= 5:
             continue
         e = s + dur
         out.append({
@@ -525,8 +533,9 @@ def expand_meeting(ev, win_start, win_end):
 def collect_holidays(cfg, start_date, today):
     """NZ public holidays from the (free, keyless) Nager.Date API, for every year
     in the window. National holidays always count; provincial anniversary days
-    only if they match `holiday_region`. Cached hard on disk — holidays for a
-    given year never change. Returns {date: name}."""
+    only if they match `holiday_region`. Cached on disk with a 7-day TTL — near
+    static, but one-off additions (e.g. a memorial day) do happen. Returns
+    {date: name}."""
     region = cfg.get("holiday_region")
     code = NZ_REGIONS.get(region) if region else None
     years = sorted({start_date.year, today.year})
@@ -790,6 +799,49 @@ def build_weeks(start_date, today):
     return weeks
 
 
+def trim_logs(cfg, keep_from):
+    """Drop tick-log lines older than `log_retain_weeks` weeks so the logs can't
+    grow forever (0/null = never trim). Never trims into the window the current
+    build is scanning; lines with no parseable epoch are kept. A file is only
+    rewritten once its oldest line is a full week past the cutoff, so the (tiny)
+    race with a daemon appending mid-rewrite is a weekly event, not a per-build
+    one — and losing means one ~30s tick, not a session."""
+    try:
+        retain = int(cfg.get("log_retain_weeks") or 0)
+    except (ValueError, TypeError):
+        retain = 0
+    if retain <= 0:
+        return
+    now = dt.datetime.now().astimezone()
+    cutoff = min(now - dt.timedelta(weeks=retain), keep_from).timestamp()
+
+    def epoch_of(line):
+        head = line.split("\t", 1)[0].strip()
+        return int(head) if head.isdigit() else None
+
+    for path in (GCOD_LOG, REVIEW_LOG, FOCUS_LOG):
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(errors="replace").splitlines(keepends=True)
+        except OSError:
+            continue
+        oldest = next((e for e in map(epoch_of, lines) if e is not None), None)
+        if oldest is None or oldest >= cutoff - 7 * 86400:
+            continue
+        kept = []
+        for ln in lines:
+            e = epoch_of(ln)
+            if e is None or e >= cutoff:
+                kept.append(ln)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text("".join(kept))
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"warning: could not trim {path}: {e}", file=sys.stderr)
+
+
 def build_blob(weeks=None):
     """Re-derive everything from the signal sources and return the data blob.
     weeks=None means "use the config default", so a Settings edit to it applies."""
@@ -801,6 +853,7 @@ def build_blob(weeks=None):
         except (ValueError, TypeError):
             weeks = DEFAULTS["weeks"]
     start_dt, end_dt, start_date, today = window_bounds(weeks)
+    trim_logs(cfg, start_dt)
 
     p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
     c_events, c_lanes = collect_checkouts(start_dt, end_dt, app_paths)
@@ -839,23 +892,33 @@ def build_blob(weeks=None):
         "holidayRegion": cfg.get("holiday_region"),
         "weeks": build_weeks(start_date, today),
         "config": {"appPaths": app_paths, "skipMeetings": cfg["skip_meetings"],
-                   "regions": sorted(NZ_REGIONS)},
+                   "regions": sorted(NZ_REGIONS),
+                   "logRetainWeeks": cfg.get("log_retain_weeks", DEFAULTS["log_retain_weeks"])},
     }
+
+
+def read_raw_config():
+    """config.json exactly as written on disk (no DEFAULTS merged), {} if missing/bad."""
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {}
+
+
+def write_raw_config(cfg):
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
 def update_config(updates):
     """Merge whitelisted preference keys into config.json (preserving the rest).
     Coerces the minute/week fields to int; ignores anything not editable."""
-    cfg = {}
-    if CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(CONFIG_PATH.read_text())
-        except (OSError, json.JSONDecodeError):
-            cfg = {}
+    cfg = read_raw_config()
     for k, v in (updates or {}).items():
         if k not in EDITABLE_KEYS:
             continue
-        if k in ("idle_tail_min", "round_to_min", "weeks"):
+        if k in ("idle_tail_min", "round_to_min", "weeks", "log_retain_weeks"):
             try:
                 v = int(v)
             except (ValueError, TypeError):
@@ -865,19 +928,14 @@ def update_config(updates):
                 continue
             v = [s.strip() for s in v if isinstance(s, str) and s.strip()]
         cfg[k] = v
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    write_raw_config(cfg)
     return cfg
 
 
 def set_jira_code(jira, code):
     """Persist one JIRA -> timesheet-code mapping in config.json. An empty code
     unsets the mapping. Preserves the rest of the file."""
-    cfg = {}
-    if CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(CONFIG_PATH.read_text())
-        except (OSError, json.JSONDecodeError):
-            cfg = {}
+    cfg = read_raw_config()
     codes = dict(cfg.get("jira_codes") or {})
     code = (code or "").strip()
     if code:
@@ -885,22 +943,16 @@ def set_jira_code(jira, code):
     else:
         codes.pop(jira, None)
     cfg["jira_codes"] = codes
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    write_raw_config(cfg)
     return codes
 
 
 def remove_jira_code(code):
     """Drop a whole timesheet code: unmap every JIRA currently pointing at it."""
-    cfg = {}
-    if CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(CONFIG_PATH.read_text())
-        except (OSError, json.JSONDecodeError):
-            cfg = {}
-    codes = {j: c for j, c in (cfg.get("jira_codes") or {}).items() if c != code}
-    cfg["jira_codes"] = codes
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
-    return codes
+    cfg = read_raw_config()
+    cfg["jira_codes"] = {j: c for j, c in (cfg.get("jira_codes") or {}).items() if c != code}
+    write_raw_config(cfg)
+    return cfg["jira_codes"]
 
 
 def render_html(blob):
@@ -1044,6 +1096,30 @@ def _serve(weeks, port, open_browser=True):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
+        def _origin_ok(self):
+            """Browsers attach Origin to cross-site requests: a page on some other
+            site must not be able to drive this server. Absent header (same-origin
+            GET, curl) is fine."""
+            origin = self.headers.get("Origin")
+            return not origin or origin in (f"http://localhost:{port}",
+                                            f"http://127.0.0.1:{port}")
+
+        def _json_body(self):
+            n = int(self.headers.get("Content-Length", 0))
+            return json.loads(self.rfile.read(n) or b"{}")
+
+        def _api(self, fn):
+            """Run fn() -> dict and send it as JSON; any exception becomes a 500.
+            `out` mirrors `error` because the Setup panel reads j.out."""
+            if not self._origin_ok():
+                self._send(403, b"forbidden", "text/plain")
+                return
+            try:
+                self._send(200, json.dumps(fn()).encode(), "application/json")
+            except Exception as e:
+                self._send(500, json.dumps({"ok": False, "error": str(e), "out": str(e)}).encode(),
+                           "application/json")
+
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
@@ -1052,61 +1128,37 @@ def _serve(weeks, port, open_browser=True):
                 except OSError:
                     self._send(500, b"build missing", "text/plain")
             elif path == "/regenerate":
-                try:
-                    blob = write_out(weeks)
-                    self._send(200, json.dumps({"ok": True, "events": len(blob["events"])}).encode(),
-                               "application/json")
-                except Exception as e:
-                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
-                               "application/json")
+                self._api(lambda: {"ok": True, "events": len(write_out(weeks)["events"])})
             elif path == "/setup-status":
-                self._send(200, json.dumps(setup_status()).encode(), "application/json")
+                self._api(setup_status)
             else:
                 self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
             path = self.path.split("?", 1)[0]
             if path == "/config":
-                try:
-                    n = int(self.headers.get("Content-Length", 0))
-                    updates = json.loads(self.rfile.read(n) or b"{}")
-                    update_config(updates)          # merge + write config.json
-                    blob = write_out(weeks)         # rebuild with the new settings
-                    self._send(200, json.dumps({"ok": True, "events": len(blob["events"])}).encode(),
-                               "application/json")
-                except Exception as e:
-                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
-                               "application/json")
+                def save_and_rebuild():
+                    update_config(self._json_body())     # merge + write config.json
+                    blob = write_out(weeks)              # rebuild with the new settings
+                    return {"ok": True, "events": len(blob["events"])}
+                self._api(save_and_rebuild)
             elif path == "/jira-code":
-                try:
-                    n = int(self.headers.get("Content-Length", 0))
-                    body = json.loads(self.rfile.read(n) or b"{}")
+                def set_code():
+                    body = self._json_body()
                     set_jira_code(body.get("jira", ""), body.get("code", ""))
-                    write_out(weeks)            # re-bake so a hard refresh stays in sync
-                    self._send(200, json.dumps({"ok": True}).encode(), "application/json")
-                except Exception as e:
-                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
-                               "application/json")
+                    write_out(weeks)                     # re-bake so a hard refresh stays in sync
+                    return {"ok": True}
+                self._api(set_code)
             elif path == "/remove-code":
-                try:
-                    n = int(self.headers.get("Content-Length", 0))
-                    body = json.loads(self.rfile.read(n) or b"{}")
-                    remove_jira_code(body.get("code", ""))
+                def rm_code():
+                    remove_jira_code(self._json_body().get("code", ""))
                     write_out(weeks)
-                    self._send(200, json.dumps({"ok": True}).encode(), "application/json")
-                except Exception as e:
-                    self._send(500, json.dumps({"ok": False, "error": str(e)}).encode(),
-                               "application/json")
+                    return {"ok": True}
+                self._api(rm_code)
             elif path == "/setup/install-focus":
-                self._send(200, json.dumps(install_focus_daemon()).encode(), "application/json")
+                self._api(install_focus_daemon)
             elif path == "/setup/install-host":
-                try:
-                    n = int(self.headers.get("Content-Length", 0))
-                    body = json.loads(self.rfile.read(n) or b"{}")
-                    self._send(200, json.dumps(install_review_host(body.get("id", ""))).encode(),
-                               "application/json")
-                except Exception as e:
-                    self._send(500, json.dumps({"ok": False, "out": str(e)}).encode(), "application/json")
+                self._api(lambda: install_review_host(self._json_body().get("id", "")))
             else:
                 self._send(404, b"not found", "text/plain")
 

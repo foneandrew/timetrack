@@ -104,11 +104,15 @@ Personal preferences (all optional — these are the defaults):
 - `idle_tail_min` — how long your last signal of the day keeps holding (`30`).
 - `round_to_min` — the **Round to** granularity (`15`).
 - `weeks` — default number of weeks to scan when `-w` isn't given (`4`).
+- `log_retain_weeks` — each build trims `checkouts.log` / `review.log` /
+  `focus.log` lines older than this many weeks, so the tick logs never grow
+  forever (`26`; `0` = never trim). Trimming always stays clear of the window
+  the current build is scanning.
 
-In [serve mode](#serve-mode-live-regenerate-button) these last six are also
-editable from the **⚙ Settings** panel in the view — it writes them back to
-`config.json` (preserving everything else) and rebuilds. `-w` on the command
-line still overrides `weeks` for that run.
+In [serve mode](#serve-mode-live-regenerate-button) these personal preferences
+are also editable from the **⚙ Settings** panel in the view — it writes them
+back to `config.json` (preserving everything else) and rebuilds. `-w` on the
+command line still overrides `weeks` for that run.
 
 ## GitHub review (browser extension)
 
@@ -150,6 +154,18 @@ measurement. Setup, internals and tuning live in **[FOCUS.md](FOCUS.md)** —
 short version: enable iTerm2's Python API, run `./bin/install-focus-daemon.sh`,
 start it from Scripts → AutoLaunch. The builder folds `~/.timetrack/focus.log`
 in automatically when it's present.
+
+## Hacking notes
+
+The built report must stay **self-contained** — it's opened as `file://`, so no
+hard CDN dependencies for core features (confetti is the template: optional and
+guarded). Tailwind is compiled statically and inlined into `template.html`'s
+`<style id="tw">` block; after adding utility classes the template hasn't used
+before, run:
+
+```bash
+./bin/build-css   # needs node; recompiles + re-inlines the CSS
+```
 
 ## Not yet wired (fast-follows)
 - Per-JIRA totals in the week view; days-as-rows table shell.
