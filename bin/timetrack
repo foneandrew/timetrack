@@ -45,8 +45,6 @@ DEFAULT_PORT = 8765
 JIRA_RE = re.compile(r"([A-Za-z]+-\d+)")
 
 DEFAULTS = {
-    # repo paths whose lane is pinned at the top as the "app" lane
-    "app_paths": [str(HOME / "dev" / "cmr-web")],
     "ics_url": None,        # Outlook published calendar .ics (secret — keep out of git)
     "skip_meetings": [],    # meeting title substrings that default to OFF
     "jira_names": {},       # override derived names, e.g. {"PROJ-123": "billing rework"}
@@ -221,19 +219,18 @@ def worktree_root(cwd):
     return root
 
 
-def lane_meta(cwd, app_paths):
+def lane_meta(cwd):
     """Build a stable lane descriptor for a working directory."""
     cwd = worktree_root(cwd)
     p = cwd.rstrip("/")
-    is_app = any(p == a.rstrip("/") for a in app_paths)
     parts = p.split("/")
     # nice label: for ~/dev/myrepo-worktrees/proj-123 -> "myrepo-worktrees/proj-123"
     label = "/".join(parts[-2:]) if len(parts) >= 2 else p
     repo = parts[-1]
-    return {"id": p, "path": p, "label": label, "repo": repo, "isApp": is_app}
+    return {"id": p, "path": p, "label": label, "repo": repo}
 
 
-def collect_prompts(start_dt, end_dt, app_paths):
+def collect_prompts(start_dt, end_dt):
     """Human-typed Claude prompts: type==user, promptSource==typed."""
     events = []
     lanes = {}
@@ -266,7 +263,7 @@ def collect_prompts(start_dt, end_dt, app_paths):
                 msg = d.get("message") or {}
                 c = msg.get("content") if isinstance(msg, dict) else None
                 preview = " ".join(c.split())[:90] if isinstance(c, str) else None
-                lm = lane_meta(cwd, app_paths)
+                lm = lane_meta(cwd)
                 lanes[lm["id"]] = lm
                 events.append({
                     "date": local.date().isoformat(),
@@ -281,7 +278,7 @@ def collect_prompts(start_dt, end_dt, app_paths):
     return events, lanes
 
 
-def collect_checkouts(start_dt, end_dt, app_paths):
+def collect_checkouts(start_dt, end_dt):
     """gco/gcod wrapper log lines: <epoch>\t<cwd>\t<branch>\t<action>."""
     events = []
     lanes = {}
@@ -298,7 +295,7 @@ def collect_checkouts(start_dt, end_dt, app_paths):
             continue
         if not (start_dt <= local <= end_dt) or not cwd:
             continue
-        lm = lane_meta(cwd, app_paths)
+        lm = lane_meta(cwd)
         lanes[lm["id"]] = lm
         events.append({
             "date": local.date().isoformat(),
@@ -671,7 +668,7 @@ def collect_reviews(start_dt, end_dt):
         i = j
 
     lane = {REVIEW_LANE: {"id": REVIEW_LANE, "path": REVIEW_LANE, "label": "GitHub review",
-                          "repo": "review", "isApp": False, "isReview": True}} if events else {}
+                          "repo": "review", "isReview": True}} if events else {}
     return events, lane, meta
 
 
@@ -689,7 +686,7 @@ def collect_reviews(start_dt, end_dt):
 MIN_DWELL_SEC = 30
 
 
-def collect_focus(start_dt, end_dt, app_paths, other_events):
+def collect_focus(start_dt, end_dt, other_events):
     """iTerm2 focus ticks: <epoch>\t<cwd>\t<branch>. Groups consecutive same-lane
     ticks into dwell runs — broken by any signal on a different lane — and emits
     the runs that span >= MIN_DWELL_SEC as focus events on the worktree lane."""
@@ -712,7 +709,7 @@ def collect_focus(start_dt, end_dt, app_paths, other_events):
         local = dt.datetime.fromtimestamp(epoch).astimezone()
         if not (start_dt <= local <= end_dt):
             continue
-        lm = lane_meta(cwd, app_paths)
+        lm = lane_meta(cwd)
         ticks.append({"epoch": epoch, "local": local, "lm": lm, "lane": lm["id"],
                       "branch": branch})
     if not ticks:
@@ -846,7 +843,6 @@ def build_blob(weeks=None):
     """Re-derive everything from the signal sources and return the data blob.
     weeks=None means "use the config default", so a Settings edit to it applies."""
     cfg = load_config()
-    app_paths = cfg["app_paths"]
     if weeks is None:
         try:
             weeks = int(cfg.get("weeks") or DEFAULTS["weeks"])
@@ -855,11 +851,11 @@ def build_blob(weeks=None):
     start_dt, end_dt, start_date, today = window_bounds(weeks)
     trim_logs(cfg, start_dt)
 
-    p_events, p_lanes = collect_prompts(start_dt, end_dt, app_paths)
-    c_events, c_lanes = collect_checkouts(start_dt, end_dt, app_paths)
+    p_events, p_lanes = collect_prompts(start_dt, end_dt)
+    c_events, c_lanes = collect_checkouts(start_dt, end_dt)
     r_events, r_lanes, r_meta = collect_reviews(start_dt, end_dt)
     # focus dwell is broken by any other-lane signal, so it needs the rest first
-    f_events, f_lanes = collect_focus(start_dt, end_dt, app_paths,
+    f_events, f_lanes = collect_focus(start_dt, end_dt,
                                       p_events + c_events + r_events)
 
     lanes = {**p_lanes, **c_lanes, **r_lanes, **f_lanes}
@@ -891,7 +887,7 @@ def build_blob(weeks=None):
         "holidays": collect_holidays(cfg, start_date, today),
         "holidayRegion": cfg.get("holiday_region"),
         "weeks": build_weeks(start_date, today),
-        "config": {"appPaths": app_paths, "skipMeetings": cfg["skip_meetings"],
+        "config": {"skipMeetings": cfg["skip_meetings"],
                    "regions": sorted(NZ_REGIONS),
                    "logRetainWeeks": cfg.get("log_retain_weeks", DEFAULTS["log_retain_weeks"])},
     }

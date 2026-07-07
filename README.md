@@ -88,7 +88,6 @@ the tail — it ends exactly at the last signal, so it never shows time you've n
 
 Copy `config.example.json` → `config.json` (gitignored — it holds your secret
 calendar URL). Keys:
-- `app_paths` — repo(s) whose lane is pinned at the top as the "app" lane.
 - `ics_url` — Outlook published-calendar `.ics` link. Meetings render as their
   own lane and overlay the resolved attention during their slot (the task
   underneath resumes after). FREE / cancelled / `skip_meetings` matches default

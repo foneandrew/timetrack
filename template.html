@@ -1093,13 +1093,12 @@ function openDay(date){
   if(mtgs.length){
     cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5" style="color:${MEETING}">Meetings</div>${meetingColHTML(date,mf)}</div>`;
   }
-  const laneIds = m ? [...new Set(m.segs.map(s=>s.lane))].sort((a,b)=>(DATA.lanes[b]?.isApp?1:0)-(DATA.lanes[a]?.isApp?1:0)) : [];
+  const laneIds = m ? [...new Set(m.segs.map(s=>s.lane))] : [];
   for(const id of laneIds){
     const segs=m.segs.filter(s=>s.lane===id);
     const laneEvs=m.evs.filter(e=>e.lane===id);
-    const app=DATA.lanes[id]?.isApp;
-    cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5 truncate ${app?'text-amber-300':'text-slate-300'}" style="max-width:96px" title="${esc(laneShort(id))}">
-             ${app?'★ ':''}${esc(laneShort(id))}</div>${barHTML(mf,segs,'width:96px',{detail:true,events:laneEvs})}</div>`;
+    cols += `<div class="pl-1"><div class="text-center text-[10px] font-medium mb-1.5 truncate text-slate-300" style="max-width:96px" title="${esc(laneShort(id))}">
+             ${esc(laneShort(id))}</div>${barHTML(mf,segs,'width:96px',{detail:true,events:laneEvs})}</div>`;
   }
   cols += `</div>`;
 
