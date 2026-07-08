@@ -1,6 +1,6 @@
 {
   "ics_url": "https://outlook.office365.com/owa/calendar/.../calendar.ics",
-  "skip_meetings": ["Lunch", "Focus time", "Hold", "Stand up", "Standup", "Birthaversaries"],
+  "skip_meetings": ["Lunch", "Focus time", "Hold", "Stand up", "Standup"],
 
   "day_start": "08:00",
   "day_end": "17:00",
