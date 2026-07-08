@@ -119,6 +119,13 @@ calendar URL). Keys:
   `TZID=New Zealand Standard Time` are treated as local.
 - `skip_meetings` — title substrings that default to OFF.
 - `jira_names` — override the auto-derived JIRA names.
+- `jira_codes` — map JIRAs onto shared **timesheet codes**, e.g.
+  `{"PROJ-123": "PLATFORM", "PROJ-456": "PLATFORM"}`. The **By timecode** toggle
+  then rolls the day up by code instead of by ticket — handy when your timesheet
+  books against broad codes rather than individual tickets. In [serve
+  mode](#serve-mode-live-regenerate-button) you don't edit this by hand: click a
+  ticket chip in the legend (or a day's breakdown) to tag it, and it's written
+  back to `config.json` for you.
 
 Personal preferences (all optional — these are the defaults):
 - `day_start` / `day_end` — the framed working day (`"08:00"` / `"17:00"`).
