@@ -15,8 +15,8 @@ still show up.
 
 ## How it works
 
-The daemon walks the same chain `claude-tab-color` does, then reads `cwd`/branch
-instead of colour. For the focused iTerm2 session it:
+The daemon walks the chain from the focused tab to the Claude session running in
+it, reading `cwd`/branch. For the focused iTerm2 session it:
 
 1. reads the session's tty,
 2. finds the Claude pid on that tty, hence its `sessionId`

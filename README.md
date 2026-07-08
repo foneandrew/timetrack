@@ -67,33 +67,43 @@ normalises everything to **local time**, and injects a JSON blob into
 
 **Signals (v1):**
 - **Human-typed Claude prompts** — `~/.claude/projects/**/*.jsonl`, filtered to
-  `promptSource: typed` (so ralph's autonomous `sdk` prompts are excluded). Each
+  `promptSource: typed` (so autonomous `sdk` prompts are excluded). Each
   carries a timestamp + `cwd` (→ worktree → JIRA). These survive worktree deletion.
-- **gco/gcod checkouts** — appended to `~/.timetrack/checkouts.log` by the shell
-  wrapper (see *Shell logging* below). Closes the gap where bare `gcod` (fzf)
-  resolves the branch to a SHA and loses the name.
+- **Branch checkouts** — `~/.timetrack/checkouts.log`, one line per branch switch
+  in `epoch ⇥ cwd ⇥ branch` form. A checkout is a strong marker of *"I started on
+  this ticket now"*, so it seeds a lane before you've typed anything. You wire up
+  the logging yourself (see *Checkout log* below); nothing writes it automatically.
 - **Terminal focus** — `~/.timetrack/focus.log`, written by the iTerm2 focus
   daemon (see [FOCUS.md](FOCUS.md)). Records which worktree was on screen each
   minute, turning latest-wins inference into measurement. Optional.
 
-## Shell logging (gco/gcod)
+## Checkout log
 
-`gco`/`gcod` in `~/.zshrc` are wrapped to record the branch you select. A
-fail-safe helper logs `epoch ⇥ cwd ⇥ branch ⇥ action`; a logging error can
-never change the checkout's behaviour:
+timetrack *reads* branch checkouts from `~/.timetrack/checkouts.log` but never
+writes it — you decide what counts as a checkout and append a line when one
+happens. Each line is tab-separated `epoch ⇥ cwd ⇥ branch`:
 
-```zsh
-_timetrack_log () {  # $1 = action (gco|gcod), $2 = branch
-  { mkdir -p "$HOME/.timetrack" && \
-    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$PWD" "$2" "$1" >> "$HOME/.timetrack/checkouts.log"; } 2>/dev/null
-  return 0
-}
-# ...then each checkout fn ends with:  && _timetrack_log gcod "$branch"
+```
+1717200000	/Users/you/dev/myrepo	PROJ-123/billing-rework
 ```
 
-Only affects shells opened *after* the edit — run `source ~/.zshrc` or open a new
-tab to start logging now. A timestamped backup of the original sits at
-`~/.zshrc.bak.timetrack-*`.
+- `epoch` — Unix seconds (`date +%s`)
+- `cwd` — the worktree you switched in (`$PWD`)
+- `branch` — the branch you moved to
+
+Trailing columns are ignored, so extra fields are harmless, and the file is
+re-read from scratch each build. Wire the append into whatever performs your
+checkouts — a shell alias, a git `post-checkout` hook, an editor command — and
+keep it fail-safe so a logging error can never disturb the checkout itself:
+
+```sh
+log_checkout () {   # call with the branch you switched to
+  { mkdir -p "$HOME/.timetrack" && \
+    printf '%s\t%s\t%s\n' "$(date +%s)" "$PWD" "$1" \
+      >> "$HOME/.timetrack/checkouts.log"; } 2>/dev/null
+  return 0
+}
+```
 
 **Attention model:** latest-wins, no mid-day gaps. The lane you last acted in stays
 active until your next event lands in a different lane. The day runs from your first

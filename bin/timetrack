@@ -28,7 +28,7 @@ from pathlib import Path
 
 HOME = Path.home()
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
-GCOD_LOG = HOME / ".timetrack" / "checkouts.log"  # written by the gco/gcod wrapper
+CHECKOUT_LOG = HOME / ".timetrack" / "checkouts.log"  # append-only branch-checkout ticks (see README)
 REVIEW_LOG = HOME / ".timetrack" / "review.log"   # written by the browser extension host
 FOCUS_LOG = HOME / ".timetrack" / "focus.log"     # written by the iTerm2 focus daemon
 REVIEW_LANE = "__github_review__"
@@ -279,16 +279,17 @@ def collect_prompts(start_dt, end_dt):
 
 
 def collect_checkouts(start_dt, end_dt):
-    """gco/gcod wrapper log lines: <epoch>\t<cwd>\t<branch>\t<action>."""
+    """Branch-checkout ticks: <epoch>\t<cwd>\t<branch>. Any further tab-separated
+    fields are ignored, so older 4-column lines (with a trailing action) still parse."""
     events = []
     lanes = {}
-    if not GCOD_LOG.exists():
+    if not CHECKOUT_LOG.exists():
         return events, lanes
-    for line in GCOD_LOG.read_text(errors="replace").splitlines():
+    for line in CHECKOUT_LOG.read_text(errors="replace").splitlines():
         parts = line.split("\t")
-        if len(parts) < 4:
+        if len(parts) < 3:
             continue
-        epoch, cwd, branch, action = parts[0], parts[1], parts[2], parts[3]
+        epoch, cwd, branch = parts[0], parts[1], parts[2]
         try:
             local = dt.datetime.fromtimestamp(int(epoch)).astimezone()
         except (ValueError, OverflowError):
@@ -304,7 +305,7 @@ def collect_checkouts(start_dt, end_dt):
             "lane": lm["id"],
             "jira": jira_from(branch),
             "branch": branch or None,
-            "type": action if action in ("gco", "gcod") else "checkout",
+            "type": "checkout",
         })
     return events, lanes
 
@@ -817,7 +818,7 @@ def trim_logs(cfg, keep_from):
         head = line.split("\t", 1)[0].strip()
         return int(head) if head.isdigit() else None
 
-    for path in (GCOD_LOG, REVIEW_LOG, FOCUS_LOG):
+    for path in (CHECKOUT_LOG, REVIEW_LOG, FOCUS_LOG):
         if not path.exists():
             continue
         try:

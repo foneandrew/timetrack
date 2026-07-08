@@ -8,7 +8,7 @@ guess. This daemon turns the guess into a measurement — every minute it record
 which Claude session was sat in front of your eyes, so reading Claude work (not
 just typing) counts on the right lane.
 
-How it hangs together (same chain claude-tab-color walks):
+How it hangs together:
   - The focused iTerm2 session has a controlling tty.
   - Claude writes ~/.claude/sessions/<pid>.json mapping pid -> sessionId; the
     pid's tty (via `ps`) is the iTerm2 session's tty.
