@@ -23,6 +23,8 @@
   .gridline { position:absolute; left:0; right:0; border-top:1px dashed rgba(255,255,255,.10); pointer-events:none; }
   .dim { opacity:.18 !important; }
   .legitem { transition: opacity .12s ease; cursor: default; }
+  /* out-specificity the .legitem cursor so taggable chips show the hand */
+  .legitem.cursor-pointer { cursor: pointer; }
   .tab { transition: all .12s ease; }
   .notch { position:absolute; pointer-events:none; }
   @keyframes ttspin { to { transform: rotate(360deg); } }
