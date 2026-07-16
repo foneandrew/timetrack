@@ -63,7 +63,8 @@ DEFAULTS = {
 
 # keys the served UI is allowed to write back to config.json
 EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min",
-                 "weeks", "holiday_region", "skip_meetings", "log_retain_weeks", "ics_url"}
+                 "weeks", "holiday_region", "skip_meetings", "log_retain_weeks", "ics_url",
+                 "jira_base_url"}
 
 # NZ regions -> Nager.Date ISO-3166-2 county codes, for filtering provincial
 # anniversary days. National holidays (global) are always included.
@@ -952,6 +953,11 @@ def update_config(updates):
         elif k == "ics_url":
             v = (v or "").strip() or None    # blank unsets it
             touched_ics = True
+        elif k == "jira_base_url":
+            v = (v or "").strip().rstrip("/")
+            if v.endswith("/browse"):        # store the host; /browse/<ID> is appended at link time
+                v = v[:-len("/browse")]
+            v = v or None                    # blank unsets it
         cfg[k] = v
     write_raw_config(cfg)
     if touched_ics:

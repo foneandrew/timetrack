@@ -164,6 +164,9 @@
       <label class="flex items-center justify-between gap-3" title="Your NZ region, for provincial anniversary days. National holidays always show; this just adds the right local anniversary.">
         <span class="text-slate-300">Holiday region <span class="text-slate-500 cursor-help">ⓘ</span></span>
         <select id="cfgRegion" class="bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></select></label>
+      <label class="block" title="Your Jira base URL, e.g. https://acme.atlassian.net — ticket chips link to /browse/<ID> here. Leave blank to turn Jira links off.">
+        <span class="text-slate-300">Jira base URL <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgJira" type="url" inputmode="url" placeholder="https://acme.atlassian.net" class="mt-1 w-full bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100 mono text-[12px]"></label>
       <label class="block" title="Meetings whose title contains any of these (one per line, case-insensitive) start switched OFF. They still show on the day — they just don't count until you toggle them on. Good for stand-ups, lunch and focus blocks.">
         <span class="text-slate-300">Meetings off by default <span class="text-slate-500 cursor-help">ⓘ</span></span>
         <textarea id="cfgSkip" rows="4" placeholder="Stand up&#10;Lunch&#10;Focus time" class="mt-1 w-full bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100 mono text-[12px]"></textarea></label>
@@ -798,6 +801,7 @@ function openSettings(){
     sel.dataset.built='1';
   }
   if(sel) sel.value = DATA.holidayRegion || '';
+  document.getElementById('cfgJira').value = DATA.jiraBaseUrl || '';
   document.getElementById('cfgSkip').value = (DATA.config?.skipMeetings||[]).join('\n');
   document.getElementById('settings').classList.remove('hidden');
 }
@@ -813,6 +817,7 @@ function saveSettings(){
     weeks:         +document.getElementById('cfgWeeks').value,
     log_retain_weeks: +document.getElementById('cfgRetain').value,
     holiday_region: document.getElementById('cfgRegion').value || null,
+    jira_base_url: document.getElementById('cfgJira').value.trim(),
     skip_meetings: document.getElementById('cfgSkip').value.split('\n').map(s=>s.trim()).filter(Boolean),
   };
   fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
