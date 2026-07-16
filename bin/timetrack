@@ -49,6 +49,7 @@ DEFAULTS = {
     "skip_meetings": [],    # meeting title substrings that default to OFF
     "jira_names": {},       # override derived names, e.g. {"PROJ-123": "billing rework"}
     "jira_codes": {},       # group JIRAs under a timesheet code, e.g. {"PROJ-123": "PLATFORM"}
+    "jira_base_url": None,   # Jira host, e.g. "https://acme.atlassian.net" — makes ticket chips link to /browse/<ID>
     # personal preferences — editable in config.json or the served Settings panel
     "day_start": "08:00",   # start of the framed working day
     "day_end": "17:00",     # end of the framed working day
@@ -219,6 +220,27 @@ def worktree_root(cwd):
     return root
 
 
+_REMOTE_CACHE = {}
+def git_remote_slug(path):
+    """'owner/repo' from the origin remote of the git worktree at `path`, or None.
+    Lets the report fall back to a GitHub PR-search link for a branch when no exact
+    PR URL was captured. Cached per path — one git call per unique worktree."""
+    if path in _REMOTE_CACHE:
+        return _REMOTE_CACHE[path]
+    slug = None
+    try:
+        r = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", r.stdout.strip())
+            if m:
+                slug = m.group(1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _REMOTE_CACHE[path] = slug
+    return slug
+
+
 def lane_meta(cwd):
     """Build a stable lane descriptor for a working directory."""
     cwd = worktree_root(cwd)
@@ -227,7 +249,7 @@ def lane_meta(cwd):
     # nice label: for ~/dev/myrepo-worktrees/proj-123 -> "myrepo-worktrees/proj-123"
     label = "/".join(parts[-2:]) if len(parts) >= 2 else p
     repo = parts[-1]
-    return {"id": p, "path": p, "label": label, "repo": repo}
+    return {"id": p, "path": p, "label": label, "repo": repo, "remote": git_remote_slug(p)}
 
 
 def collect_prompts(start_dt, end_dt):
@@ -884,6 +906,7 @@ def build_blob(weeks=None):
         "events": events,
         "jiraNames": build_jira_names(events, cfg.get("jira_names")),
         "jiraCodes": cfg.get("jira_codes") or {},
+        "jiraBaseUrl": (cfg.get("jira_base_url") or "").rstrip("/"),
         "reviewMeta": r_meta,
         "meetings": collect_meetings(cfg, start_date, today),
         "holidays": collect_holidays(cfg, start_date, today),

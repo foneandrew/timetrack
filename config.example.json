@@ -9,5 +9,7 @@
   "round_to_min": 15,
   "weeks": 4,
 
-  "jira_codes": {"PROJ-123": "PLATFORM", "PROJ-456": "PLATFORM"}
+  "jira_codes": {"PROJ-123": "PLATFORM", "PROJ-456": "PLATFORM"},
+
+  "jira_base_url": "https://acme.atlassian.net"
 }
