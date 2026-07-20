@@ -419,6 +419,13 @@ function ticketsThisWeek(date){
   for(const d of w.days){ const m=dayModel(d.date); if(m) for(const s of m.segs){ if(s.jira && s.lane!==REVIEW_LANE && !isBranchKey(s.jira)) set.add(s.jira); } }
   return [...set].sort();
 }
+// branch-tasks (branches you've ticked "track as task") active in the week of `date`
+function branchTasksThisWeek(date){
+  const w=DATA.weeks.find(x=>x.days.some(d=>d.date===date)); if(!w) return [];
+  const set=new Set();
+  for(const d of w.days){ const m=dayModel(d.date); if(m) for(const s of m.segs){ if(isBranchKey(s.jira) && branchIsTask(s.jira)) set.add(s.jira); } }
+  return [...set].sort();
+}
 
 // Deterministic overlap order for overrides that step on each other: a later
 // start wins (it's processed last, carving on top); tied starts, the shorter
@@ -1278,7 +1285,7 @@ function overrideColHTML(date, mf){
     const col=isBreak?BREAKCOL:(ident?colorFor(ident):BREAKCOL);
     const stripe=isBreak?'background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.18) 0 5px,transparent 5px 10px);':'';
     const ring=b.type==='fixed'?'box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.6);':'';   // a locked look for Fixed
-    const lab=isBreak?'break':(ident||'pick…'), txt=isBreak?'rgba(255,255,255,.92)':textOn(ident);
+    const lab=isBreak?'break':(ident?idLabel(ident):'pick…'), txt=isBreak?'rgba(255,255,255,.92)':textOn(ident);
     h+=`<div class="ovr absolute rounded-[3px] cursor-grab" data-oidx="${idx}" title="click to edit"
          style="top:${top}px;height:${height}px;left:3px;right:3px;background:${col};${stripe}${ring}touch-action:none">
          <button class="ovr-x absolute top-0 right-0 leading-none text-[11px] px-1 text-white/80 hover:text-white" title="delete">✕</button>
@@ -1289,7 +1296,7 @@ function overrideColHTML(date, mf){
 }
 function minFromY(el, clientY, mf){ const r=el.getBoundingClientRect(); return mf.frameStart + (clientY-r.top)/r.height*(mf.frameEnd-mf.frameStart); }
 function showOverrideLabel(o,x,y){
-  const ident=o.jira||o.label, head=o.type==='break'?'break':((o.type==='fixed'?'fixed':'task')+(ident?' · '+ident:''));
+  const ident=o.jira||o.label, head=o.type==='break'?'break':((o.type==='fixed'?'fixed':'task')+(ident?' · '+idLabel(ident):''));
   tip.innerHTML=`<div class="font-semibold text-white">${esc(head)}</div><div class="text-slate-300">${fmt(o.start)} · ${dur(o.end-o.start)}</div>`;
   tip.style.opacity='1'; moveTip(x,y);
 }
@@ -1655,6 +1662,8 @@ function closeOverrideEditor(){ const m=document.getElementById('ovrMenu'); if(m
 function openOverrideEditor(date, idx, anchor){
   closeOverrideEditor();
   const o=(OVERRIDES[date]||[])[idx]; if(!o) return;
+  const ident=o.jira||o.label||'';
+  const localIdent = !!ident && (!!o.label || isBranchKey(o.jira));   // custom name or branch task — groupable locally
   const m=document.createElement('div');
   m.id='ovrMenu';
   m.className='fixed z-50 bg-[#0c0e14] border border-white/15 rounded-lg shadow-xl p-2.5 text-xs';
@@ -1662,15 +1671,27 @@ function openOverrideEditor(date, idx, anchor){
   const seg=(t,lab)=>`<button data-type="${t}" class="flex-1 px-2 py-1 ${o.type===t?'bg-blue-500 text-white':'text-slate-300 hover:bg-white/10'}">${lab}</button>`;
   let html=`<div class="flex rounded-md overflow-hidden border border-white/10 mb-2">${seg('break','Break')}${seg('task','Task')}${seg('fixed','Fixed')}</div>`;
   if(o.type!=='break'){
-    const ident=o.jira||o.label||'';
-    html+=`<div class="text-slate-400 mb-1.5">Label · <span class="text-slate-200 font-semibold">${ident?esc(ident):'pick one'}</span>${o.type==='fixed'?' <span class="text-amber-200">· locked</span>':''}</div>`;
+    html+=`<div class="text-slate-400 mb-1.5">Label · <span class="text-slate-200 font-semibold">${ident?esc(idLabel(ident)):'pick one'}</span>${o.type==='fixed'?' <span class="text-amber-200">· locked</span>':''}</div>`;
     const tix=ticketsThisWeek(date);
     if(tix.length) html+=`<div class="text-[10px] text-slate-500 mb-0.5">tickets this week</div><div class="flex flex-wrap gap-1 mb-1.5">`
       +tix.map(j=>`<button data-jira="${esc(j)}" class="px-1.5 py-0.5 rounded border ${o.jira===j?'bg-blue-500 border-blue-400 text-white':'border-white/10 text-slate-300 hover:bg-white/10'}">${esc(j)}</button>`).join('')+`</div>`;
+    const brts=branchTasksThisWeek(date);
+    if(brts.length) html+=`<div class="text-[10px] text-slate-500 mb-0.5">branch tasks</div><div class="flex flex-wrap gap-1 mb-1.5">`
+      +brts.map(j=>`<button data-jira="${esc(j)}" class="px-1.5 py-0.5 rounded border ${o.jira===j?'bg-blue-500 border-blue-400 text-white':'border-white/10 text-slate-300 hover:bg-white/10'}">${esc(idLabel(j))}</button>`).join('')+`</div>`;
     const customs=customNamesInWindow();
     if(customs.length) html+=`<div class="text-[10px] text-slate-500 mb-0.5">custom names</div><div class="flex flex-wrap gap-1 mb-1.5">`
       +customs.map(n=>`<button data-label="${esc(n)}" class="px-1.5 py-0.5 rounded border ${o.label===n?'bg-blue-500 border-blue-400 text-white':'border-white/10 text-slate-300 hover:bg-white/10'}">${esc(n)}</button>`).join('')+`</div>`;
     html+=`<div class="flex gap-1"><input id="ovrName" placeholder="new custom name…" class="flex-1 min-w-0 bg-white/5 border border-white/10 rounded px-2 py-0.5 text-slate-100 outline-none focus:border-blue-400"><button id="ovrSet" class="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-slate-200">set</button></div>`;
+    // a custom name or branch task carries a local identity, so it can roll into an
+    // existing timecode group just like a real ticket does
+    if(localIdent){
+      const gcur=codeOf(ident)||'', gcodes=existingCodes();
+      if(gcodes.length){
+        html+=`<div class="text-[10px] text-slate-500 mt-2 mb-0.5">group</div><div class="flex flex-wrap gap-1 mb-1">`
+          +gcodes.map(c=>`<button data-grp="${esc(c)}" class="px-1.5 py-0.5 rounded border ${c===gcur?'bg-blue-500 border-blue-400 text-white':'border-white/10 text-slate-300 hover:bg-white/10'}">${esc(c)}</button>`).join('')+`</div>`;
+        if(gcur) html+=`<button id="ovrGrpClear" class="text-slate-500 hover:text-slate-300 underline">remove from ${esc(gcur)}</button>`;
+      }
+    }
   }
   html+=`<button id="ovrDel" class="mt-2 text-slate-500 hover:text-red-300 underline">delete entry</button>`;
   m.innerHTML=html;
@@ -1686,6 +1707,8 @@ function openOverrideEditor(date, idx, anchor){
   });
   m.querySelectorAll('[data-jira]').forEach(btn=> btn.onclick=()=> pick({jira:btn.dataset.jira}));
   m.querySelectorAll('[data-label]').forEach(btn=> btn.onclick=()=> pick({label:btn.dataset.label}));
+  m.querySelectorAll('[data-grp]').forEach(btn=> btn.onclick=()=>{ closeOverrideEditor(); assignCode(ident, btn.dataset.grp, true); });
+  const gc=m.querySelector('#ovrGrpClear'); if(gc) gc.onclick=()=>{ closeOverrideEditor(); assignCode(ident,'', true); };
   const inp=m.querySelector('#ovrName');
   if(inp){ inp.focus();
     const set=()=>{ const v=inp.value.trim(); if(v) pick({label:v}); };
