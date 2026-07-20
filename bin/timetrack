@@ -50,6 +50,7 @@ DEFAULTS = {
     "jira_names": {},       # override derived names, e.g. {"PROJ-123": "billing rework"}
     "jira_codes": {},       # group JIRAs under a timesheet code, e.g. {"PROJ-123": "PLATFORM"}
     "jira_base_url": None,   # Jira host, e.g. "https://acme.atlassian.net" — makes ticket chips link to /browse/<ID>
+    "protected_branches": ["main", "master"],  # trunk branches that can't be tracked as a task or grouped
     # personal preferences — editable in config.json or the served Settings panel
     "day_start": "08:00",   # start of the framed working day
     "day_end": "17:00",     # end of the framed working day
@@ -64,7 +65,7 @@ DEFAULTS = {
 # keys the served UI is allowed to write back to config.json
 EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min",
                  "weeks", "holiday_region", "skip_meetings", "log_retain_weeks", "ics_url",
-                 "jira_base_url"}
+                 "jira_base_url", "protected_branches"}
 
 # NZ regions -> Nager.Date ISO-3166-2 county codes, for filtering provincial
 # anniversary days. National holidays (global) are always included.
@@ -908,6 +909,7 @@ def build_blob(weeks=None):
         "jiraNames": build_jira_names(events, cfg.get("jira_names")),
         "jiraCodes": cfg.get("jira_codes") or {},
         "jiraBaseUrl": (cfg.get("jira_base_url") or "").rstrip("/"),
+        "protectedBranches": cfg.get("protected_branches") or DEFAULTS["protected_branches"],
         "reviewMeta": r_meta,
         "meetings": collect_meetings(cfg, start_date, today),
         "holidays": collect_holidays(cfg, start_date, today),
@@ -946,7 +948,7 @@ def update_config(updates):
                 v = int(v)
             except (ValueError, TypeError):
                 continue
-        elif k == "skip_meetings":
+        elif k in ("skip_meetings", "protected_branches"):
             if not isinstance(v, list):
                 continue
             v = [s.strip() for s in v if isinstance(s, str) and s.strip()]

@@ -11,5 +11,7 @@
 
   "jira_codes": {"PROJ-123": "PLATFORM", "PROJ-456": "PLATFORM"},
 
-  "jira_base_url": "https://acme.atlassian.net"
+  "jira_base_url": "https://acme.atlassian.net",
+
+  "protected_branches": ["main", "master"]
 }
