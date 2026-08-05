@@ -511,7 +511,13 @@ def expand_rrule(start_dt, rrule, win_end):
     return occ
 
 
-def expand_meeting(ev, win_start, win_end):
+def expand_meeting(ev, win_start, win_end, moved=()):
+    """`moved` holds naive wall-clock starts claimed by RECURRENCE-ID overrides
+    of this event's series — those instances are dropped here because the
+    override VEVENT re-emits each one itself (at its new time if it moved).
+    Wall-clock rather than instants: a generated occurrence keeps DTSTART's UTC
+    offset while a parsed RECURRENCE-ID gets its own date's, so instant equality
+    would miss across a DST boundary."""
     if "DTSTART" not in ev:
         return []
     start_dt, all_day = parse_ics_dt(*ev["DTSTART"])
@@ -542,6 +548,8 @@ def expand_meeting(ev, win_start, win_end):
     out = []
     for s in starts:
         if s in ex_dts or s.date() in ex_dates or not (win_start <= s.date() <= win_end) or s.weekday() >= 5:
+            continue
+        if s.replace(tzinfo=None) in moved:
             continue
         e = s + dur
         out.append({
@@ -611,9 +619,25 @@ def collect_meetings(cfg, start_date, today):
         print(f"warning: calendar fetch/parse failed: {e}", file=sys.stderr)
         return []
     skip = [s.lower() for s in cfg.get("skip_meetings", [])]
+    # An edited or moved occurrence arrives as its own VEVENT carrying a
+    # RECURRENCE-ID naming the slot it replaces in its series — collect those
+    # per UID so the master's expansion drops the originals. Without this a
+    # rescheduled instance shows twice: as a ghost at the old time (from the
+    # RRULE) and for real at the new one.
+    moved = {}
+    for ev in events:
+        rid, uid = ev.get("RECURRENCE-ID"), ev.get("UID")
+        if rid and uid:
+            try:
+                d, rid_all_day = parse_ics_dt(rid)
+                if not rid_all_day:
+                    moved.setdefault(uid, set()).add(d.replace(tzinfo=None))
+            except Exception:
+                pass
     meetings, seen = [], set()
     for ev in events:
-        for m in expand_meeting(ev, start_date, today):
+        claimed = moved.get(ev.get("UID"), ()) if "RECURRENCE-ID" not in ev else ()
+        for m in expand_meeting(ev, start_date, today, claimed):
             m["id"] = f'{m["date"]}|{m["startMin"]}|{m["title"]}'
             if m["id"] in seen:
                 continue
