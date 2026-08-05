@@ -141,6 +141,9 @@ Personal preferences (all optional — these are the defaults):
 - `day_start` / `day_end` — the framed working day (`"08:00"` / `"17:00"`).
 - `full_day` — the **Fit to** timesheet target (`"07:30"`).
 - `idle_tail_min` — how long your last signal of the day keeps holding (`30`).
+- `break_min` — a signal-free gap at least this long (outside meetings) is
+  flagged in the chart as a suspected break — click it to accept (it becomes a
+  normal break override) or dismiss (`45`; `0` = detection off).
 - `round_to_min` — the **Round to** granularity (`15`).
 - `weeks` — default number of weeks to scan when `-w` isn't given (`4`).
 - `log_retain_weeks` — each build trims `checkouts.log` / `review.log` /

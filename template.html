@@ -152,6 +152,9 @@
       <label class="flex items-center justify-between gap-3" title="How long your last signal keeps counting as active before the day ends. Past days only — today always stops at your last signal.">
         <span class="text-slate-300">End-of-day stretch (min) <span class="text-slate-500 cursor-help">ⓘ</span></span>
         <input id="cfgIdle" type="number" min="0" step="5" class="w-24 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
+      <label class="flex items-center justify-between gap-3" title="A signal-free gap at least this long (outside meetings) gets flagged as a suspected break — click it in the chart to confirm or dismiss. 0 turns detection off.">
+        <span class="text-slate-300">Detect breaks over (min) <span class="text-slate-500 cursor-help">ⓘ</span></span>
+        <input id="cfgBreak" type="number" min="0" step="5" class="w-24 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
       <label class="flex items-center justify-between gap-3" title="When the 'Round to' toggle is on, each timesheet row is rounded to a multiple of this many minutes, still summing to the same total.">
         <span class="text-slate-300">Round to (min) <span class="text-slate-500 cursor-help">ⓘ</span></span>
         <input id="cfgRound" type="number" min="1" step="1" class="w-24 bg-[#1c2029] border border-white/10 rounded-lg px-2 py-1 text-slate-100"></label>
@@ -206,7 +209,7 @@
 
 <script>
 /*__TIMETRACK_DATA__*/
-const DATA = window.__TIMETRACK__ || {events:[],lanes:{},weeks:[],jiraNames:{},frame:{startMin:480,endMin:1020,idleTailMin:30}};
+const DATA = window.__TIMETRACK__ || {events:[],lanes:{},weeks:[],jiraNames:{},frame:{startMin:480,endMin:1020,idleTailMin:30,breakMin:45}};
 const FRAME = DATA.frame;
 const NAMES = DATA.jiraNames || {};
 const REVMETA = DATA.reviewMeta || {};
@@ -498,6 +501,52 @@ function mergedBreaks(resolvedSegs){
   for(const b of list){ const last=out[out.length-1];
     if(last && b.start<=last.end) last.end=Math.max(last.end,b.end); else out.push({start:b.start,end:b.end}); }
   return out;
+}
+// ---------- inferred breaks (suggest-only — accepting one just makes a break override) ----------
+// A candidate is a signal-free span between two consecutive signals (closed gaps
+// only, so today's trailing gap stays the catch-up block), longer than breakMin,
+// after knocking out anything that already explains the silence: attended
+// meetings and existing overrides of any type. Dismissals are remembered by exact
+// span — if a regenerate shifts a gap's edges, it re-asks, which is fair: new
+// evidence, new question.
+const GAPDISMISS = (()=>{ try { return JSON.parse(localStorage.getItem('tt_gapdismiss')||'{}'); } catch(e){ return {}; } })();
+function saveGapDismiss(){ try { localStorage.setItem('tt_gapdismiss', JSON.stringify(GAPDISMISS)); } catch(e){} }
+function gapCandidates(date, m){
+  const thr = FRAME.breakMin|0;
+  if(thr<=0 || !m) return [];
+  const dis = GAPDISMISS[date]||[];
+  const knock = [...meetingsForDay(date).filter(isOn).map(mt=>({start:mt.startMin,end:mt.endMin})),
+                 ...overridesForDay(date)];
+  const out=[];
+  for(let i=0;i<m.evs.length-1;i++){
+    const s=m.evs[i].minute, e=m.evs[i+1].minute;
+    if(e-s<thr) continue;
+    let spans=[{start:s,end:e}];
+    for(const k of knock){
+      const nx=[];
+      for(const sp of spans){
+        if(sp.end<=k.start || sp.start>=k.end){ nx.push(sp); continue; }
+        if(sp.start<k.start) nx.push({start:sp.start,end:k.start});
+        if(sp.end>k.end)     nx.push({start:k.end,end:sp.end});
+      }
+      spans=nx;
+    }
+    // whole minutes: signal times are fractional, and these spans become override
+    // spans and dismissal keys — keep both tidy
+    for(const sp of spans){
+      const st=Math.round(sp.start), en=Math.round(sp.end);
+      if(en-st>=thr && !dis.includes(st+'-'+en)) out.push({date, start:st, end:en});
+    }
+  }
+  return out;
+}
+function acceptGap(date, start, end){
+  (OVERRIDES[date] || (OVERRIDES[date]=[])).push({type:'break', start, end, added:Date.now()});
+  saveOverrides();
+}
+function dismissGap(date, start, end){
+  (GAPDISMISS[date] || (GAPDISMISS[date]=[])).push(start+'-'+end);
+  saveGapDismiss();
 }
 function frameFor(date, base){
   let s = base?base.frameStart:FRAME.startMin, e = base?base.frameEnd:FRAME.endMin;
@@ -872,6 +921,7 @@ function openSettings(){
   document.getElementById('cfgEnd').value   = fmt(FRAME.endMin);
   document.getElementById('cfgFull').value  = fmt(FULL_DAY);
   document.getElementById('cfgIdle').value  = FRAME.idleTailMin;
+  document.getElementById('cfgBreak').value = FRAME.breakMin ?? 45;
   document.getElementById('cfgRound').value = QUARTER;
   document.getElementById('cfgWeeks').value = DATA.window?.weeks||4;
   document.getElementById('cfgRetain').value = DATA.config?.logRetainWeeks ?? 26;
@@ -896,6 +946,7 @@ function saveSettings(){
     day_end:   document.getElementById('cfgEnd').value,
     full_day:  document.getElementById('cfgFull').value,
     idle_tail_min: +document.getElementById('cfgIdle').value,
+    break_min:     +document.getElementById('cfgBreak').value,
     round_to_min:  +document.getElementById('cfgRound').value,
     weeks:         +document.getElementById('cfgWeeks').value,
     log_retain_weeks: +document.getElementById('cfgRetain').value,
@@ -1117,6 +1168,17 @@ function barHTML(m, segs, widthStyle, opts={}){
            ${height>15?`<span class="text-[9px] font-semibold pl-1 leading-tight block truncate" style="color:rgba(148,163,184,.85)">break</span>`:''}</div>`;
     }
   }
+  // suspected breaks: a signal-free gap awaiting a verdict — click to confirm or dismiss
+  if(opts.gaps){
+    for(const g of opts.gaps){
+      const top=yFor(g.start,m), height=Math.max(2,yFor(g.end,m)-top);
+      h+=`<div onclick="event.stopPropagation(); openGapMenu('${g.date}',${g.start},${g.end},this)"
+           title="possible break · ${fmt(g.start)}–${fmt(g.end)} · ${dur(g.end-g.start)} without a signal — click to confirm or dismiss"
+           class="gapseg absolute rounded-[3px] cursor-pointer"
+           style="top:${top}px;height:${height}px;left:3px;right:3px;z-index:6;background-color:rgba(12,14,20,.5);background-image:repeating-linear-gradient(45deg,rgba(251,191,36,.3) 0 5px,transparent 5px 10px);border:1.5px dashed rgba(251,191,36,.8)">
+           ${height>15?`<span class="text-[9px] font-semibold pr-1 leading-tight block truncate" style="color:rgb(252,211,77);text-align:right">break?</span>`:''}</div>`;
+    }
+  }
   // today only (served): a clickable gap from the last signal to now — re-scans signals.
   // only drawn when tall enough to fit its own label, per the "big enough" rule.
   if(opts.live && opts.live.to>opts.live.from){
@@ -1214,7 +1276,7 @@ function renderWeek(){
         ${holBadge}</div>`;
     if(c.has){
       const live = (liveTo!=null && d.date===BUILD_TODAY && c.m) ? {from:c.m.activeEnd, to:liveTo} : null;
-      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(c.segs), live})}</div>`;
+      html += `<div class="flex justify-center">${barHTML(shared, mergeSameJira(c.segs), 'width:100%', {breaks:mergedBreaks(c.segs), gaps:gapCandidates(d.date, c.m), live})}</div>`;
       html += `<div class="text-center text-base text-white mono mt-2 font-bold tracking-tight">${dur(sum.totalMins)}</div>`;
       html += `<div class="mt-2.5 space-y-2">${sum.items.map(it=>`
         <div class="legitem text-[11px]" data-jira="${esc(it.key)}">
@@ -1352,7 +1414,7 @@ function openDay(date){
   const headBox = inner => `<div class="flex items-end justify-center text-center mb-1.5" style="height:26px">${inner}</div>`;
   const axisCol = `<div>${headBox('<div class="text-[11px] font-semibold invisible" aria-hidden="true">x</div>')}${hourAxis(mf,true)}</div>`;
   const resolvedCol = `<div class="pl-1">${headBox('<div class="text-[11px] font-semibold text-white">Resolved</div>')}
-           ${barHTML(mf,mergeSameJira(rsegs),'width:96px',{detail:true,breaks:mergedBreaks(rsegs),col:'resolved'})}</div>`;
+           ${barHTML(mf,mergeSameJira(rsegs),'width:96px',{detail:true,breaks:mergedBreaks(rsegs),gaps:gapCandidates(date, m),col:'resolved'})}</div>`;
   // Axis + Resolved live OUTSIDE the scroller as a fixed left block, so they can't
   // move; only the lanes/meetings/overrides scroll. A two-box split (static + its
   // own overflow-x scroller) is far more robust than position:sticky, which the
@@ -1656,6 +1718,30 @@ function openCodeMenu(jira, anchor, isCustom){
   const cl=m.querySelector('#codeClear'); if(cl) cl.onclick=()=>{ closeCodeMenu(); assignCode(jira,'', isCustom); };
 }
 document.addEventListener('mousedown', e=>{ const m=document.getElementById('codeMenu'); if(m && !m.contains(e.target) && !e.target.closest('[data-codejira]')) closeCodeMenu(); }, true);
+
+// ---------- suspected-break popover: one click decides, either way the flourish goes ----------
+function closeGapMenu(){ const m=document.getElementById('gapMenu'); if(m) m.remove(); }
+function openGapMenu(date, start, end, anchor){
+  closeGapMenu();
+  const m=document.createElement('div');
+  m.id='gapMenu';
+  m.className='fixed z-50 bg-[#0c0e14] border border-white/15 rounded-lg shadow-xl p-2.5 text-xs';
+  m.style.minWidth='200px';
+  m.innerHTML=`<div class="text-slate-200 font-semibold mb-0.5">Break detected</div>
+    <div class="text-slate-400 mono mb-2">${fmt(start)}–${fmt(end)} · ${dur(end-start)} without a signal</div>
+    <div class="flex gap-1.5">
+      <button id="gapYes" class="flex-1 px-2 py-1 rounded bg-blue-500 hover:bg-blue-400 text-white font-medium">Take break</button>
+      <button id="gapNo" class="flex-1 px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-slate-200">Not a break</button>
+    </div>`;
+  document.body.appendChild(m);
+  const r=anchor.getBoundingClientRect();
+  m.style.left=Math.min(r.left, innerWidth-m.offsetWidth-8)+'px';
+  m.style.top=(Math.min(r.bottom+6, innerHeight-m.offsetHeight-8))+'px';
+  const done=()=>{ closeGapMenu(); renderWeek(); if(currentDay) openDay(currentDay); };
+  m.querySelector('#gapYes').onclick=()=>{ acceptGap(date,start,end); done(); };
+  m.querySelector('#gapNo').onclick=()=>{ dismissGap(date,start,end); done(); };
+}
+document.addEventListener('mousedown', e=>{ const m=document.getElementById('gapMenu'); if(m && !m.contains(e.target) && !e.target.closest('.gapseg')) closeGapMenu(); }, true);
 
 // ---------- override editor: set an entry's type (break/task/fixed) and its target ----------
 function closeOverrideEditor(){ const m=document.getElementById('ovrMenu'); if(m) m.remove(); }

@@ -56,6 +56,7 @@ DEFAULTS = {
     "day_end": "17:00",     # end of the framed working day
     "full_day": "07:30",    # "Fit to" timesheet target
     "idle_tail_min": 30,    # how long your last signal of the day keeps holding
+    "break_min": 45,        # flag signal-free gaps at least this long as suspected breaks (0 = off)
     "round_to_min": 15,     # "Round to" granularity
     "weeks": 4,             # default number of weeks to scan when -w isn't given
     "holiday_region": "Wellington",  # NZ region for provincial anniversary days (or null = national only)
@@ -63,7 +64,7 @@ DEFAULTS = {
 }
 
 # keys the served UI is allowed to write back to config.json
-EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "round_to_min",
+EDITABLE_KEYS = {"day_start", "day_end", "full_day", "idle_tail_min", "break_min", "round_to_min",
                  "weeks", "holiday_region", "skip_meetings", "log_retain_weeks", "ics_url",
                  "jira_base_url", "protected_branches"}
 
@@ -899,6 +900,7 @@ def build_blob(weeks=None):
             "startMin": hhmm_to_min(cfg.get("day_start"), 8 * 60),
             "endMin": hhmm_to_min(cfg.get("day_end"), 17 * 60),
             "idleTailMin": int(cfg.get("idle_tail_min") or DEFAULTS["idle_tail_min"]),
+            "breakMin": int(cfg.get("break_min") or 0),   # 0/null = detection off
         },
         "timesheet": {
             "fullDayMin": hhmm_to_min(cfg.get("full_day"), 450),
@@ -943,7 +945,7 @@ def update_config(updates):
     for k, v in (updates or {}).items():
         if k not in EDITABLE_KEYS:
             continue
-        if k in ("idle_tail_min", "round_to_min", "weeks", "log_retain_weeks"):
+        if k in ("idle_tail_min", "break_min", "round_to_min", "weeks", "log_retain_weeks"):
             try:
                 v = int(v)
             except (ValueError, TypeError):

@@ -6,6 +6,7 @@
   "day_end": "17:00",
   "full_day": "07:30",
   "idle_tail_min": 30,
+  "break_min": 45,
   "round_to_min": 15,
   "weeks": 4,
 
