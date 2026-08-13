@@ -18,6 +18,8 @@
   .mono { font-family: 'JetBrains Mono', monospace; }
   .seg { transition: opacity .12s ease, filter .12s ease, outline .12s ease; cursor: default; }
   .seg:hover { filter: brightness(1.15); outline: 2px solid rgba(255,255,255,.7); outline-offset:-1px; z-index:6; }
+  /* out-specificity the .seg cursor so clickable segments (meetings) show the hand */
+  .seg.cursor-pointer { cursor: pointer; }
   .daycol { transition: background .12s ease; }
   .daycol:hover { background: rgba(255,255,255,.05); }
   .gridline { position:absolute; left:0; right:0; border-top:1px dashed rgba(255,255,255,.10); pointer-events:none; }
