@@ -1139,6 +1139,8 @@ function dayModel(date){
 
 // ---------- bar rendering ----------
 const BAR_H = 380;
+// narrowest a day column may be squeezed before the week starts scrolling instead
+const DAYCOL_MIN = 110;
 function yFor(min,m){ return (min-m.frameStart)/(m.frameEnd-m.frameStart)*BAR_H; }
 
 // registry for instant tooltips
@@ -1258,8 +1260,12 @@ function renderWeek(){
 
   // axis gets an invisible header matching the day-column header so the hour
   // lines align with the bars, not the column tops
-  const axisHead = `<div><div class="text-center mb-2 invisible" aria-hidden="true"><div class="text-xs font-semibold">M</div><div class="text-[10px] mono">x</div><div class="text-[10px] mt-0.5">x</div></div>${hourAxis(shared)}</div>`;
-  let html = `<div class="flex gap-3 items-start">${axisHead}<div class="flex gap-3 flex-1">`;
+  const axisHead = `<div class="shrink-0"><div class="text-center mb-2 invisible" aria-hidden="true"><div class="text-xs font-semibold">M</div><div class="text-[10px] mono">x</div><div class="text-[10px] mt-0.5">x</div></div>${hourAxis(shared)}</div>`;
+  // the day columns scroll on their own so a narrow viewport doesn't drag the whole
+  // page sideways, and the axis — sitting outside the scroller — stays put.
+  // The 2px padding paired with -2px margin gives today's ring room inside the
+  // scroller's clip without shifting the columns off the axis by those 2px.
+  let html = `<div class="flex gap-3 items-start">${axisHead}<div class="overflow-x-auto min-w-0 flex-1" style="padding:2px;margin:-2px"><div class="flex gap-3">`;
   for(const c of cells){
     const d=c.d;
     const sum = c.has ? daySummary(d.date, c.segs) : null;
@@ -1270,7 +1276,7 @@ function renderWeek(){
         class="mt-0.5 text-[10px] flex items-center justify-center gap-1 cursor-pointer ${worked?'opacity-40 line-through':'text-amber-200'}">
         <span>${theme.icon}</span><span class="truncate">${esc(hol)}</span></div>` : '';
     const isNowToday = REAL_TODAY ? d.date===REAL_TODAY : d.isToday;
-    html += `<div class="daycol flex-1 min-w-0 rounded-xl p-2 cursor-pointer ${isNowToday?'ring-1 ring-blue-400/50':''} ${festive?'bg-amber-400/5':''}" onclick="openDay('${d.date}')">
+    html += `<div class="daycol flex-1 rounded-xl p-2 cursor-pointer ${isNowToday?'ring-1 ring-blue-400/50':''} ${festive?'bg-amber-400/5':''}" style="min-width:${DAYCOL_MIN}px" onclick="openDay('${d.date}')">
       <div class="text-center mb-2">
         <div class="text-xs font-semibold ${isNowToday?'text-blue-300':'text-slate-200'}">${d.weekday.slice(0,3)}</div>
         <div class="text-[10px] text-slate-400 mono">${d.short.replace(/^\w+\s/,'')}</div>
@@ -1310,7 +1316,7 @@ function renderWeek(){
     }
     html += `</div>`;
   }
-  document.getElementById('week').innerHTML = html + `</div></div>`;
+  document.getElementById('week').innerHTML = html + `</div></div></div>`;
   wireHover();
 }
 
