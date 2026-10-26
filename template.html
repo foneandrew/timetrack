@@ -1004,7 +1004,13 @@ function weekEffect(){
   if(!w) return 'none';
   for(const d of w.days) if(d.date.slice(5,7)==='12') return 'beach';   // all December
   for(const d of w.days){ const h=holidayName(d.date); if(h){ const e=holidayTheme(h).effect; if(e!=='none') return e; } }
-  for(const d of w.days){ const md=d.date.slice(5); if(md==='10-31') return 'halloween'; if(md==='11-05') return 'fireworks'; }
+  // weeks only list Mon–Fri, so scan the full Mon–Sun span to catch weekend dates
+  const mon=new Date(w.days[0].date+'T00:00');
+  for(let i=0;i<7;i++){
+    const d=new Date(mon); d.setDate(mon.getDate()+i);
+    const md=String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    if(md==='10-31') return 'halloween'; if(md==='11-05') return 'fireworks';
+  }
   return 'none';
 }
 function stopEffect(){ if(effectTimer){ clearInterval(effectTimer); effectTimer=null; }
